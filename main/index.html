@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>BAPT'HIT</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-alt: #1a1a1a;
+  --border: #2a2a2a;
+  --red: #e81a1a;
+  --red-glow: #ff2020;
+  --red-dim: #8b1111;
+  --gold: #d4a520;
+  --gold-dim: #8b6914;
+  --text: #e8e8e8;
+  --text-dim: #666;
+  --text-muted: #444;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(232,26,26,0.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 50% 100%, rgba(232,26,26,0.03) 0%, transparent 50%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+/* ---- HEADER ---- */
+
+.header {
+  text-align: center;
+  padding: 2rem 1rem 0;
+  position: relative;
+}
+
+.title {
+  font-family: Impact, 'Arial Black', 'Helvetica Neue', sans-serif;
+  font-size: 3.2rem;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--red);
+  text-shadow:
+    0 0 20px rgba(232,26,26,0.6),
+    0 0 60px rgba(232,26,26,0.3),
+    0 0 100px rgba(232,26,26,0.15);
+  position: relative;
+  display: inline-block;
+  animation: titlePulse 3s ease-in-out infinite;
+}
+
+.title::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: -2rem;
+  right: -2rem;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--red-dim), transparent);
+  z-index: -1;
+}
+
+@keyframes titlePulse {
+  0%, 100% { text-shadow: 0 0 20px rgba(232,26,26,0.6), 0 0 60px rgba(232,26,26,0.3); }
+  50% { text-shadow: 0 0 30px rgba(232,26,26,0.8), 0 0 80px rgba(232,26,26,0.4); }
+}
+
+/* ---- TABS ---- */
+
+.tabs {
+  display: flex;
+  justify-content: center;
+  gap: 0;
+  margin: 1.5rem auto 0;
+  max-width: 280px;
+}
+
+.tab {
+  flex: 1;
+  padding: 0.7rem 1.2rem;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  position: relative;
+}
+
+.tab:first-child { border-radius: 6px 0 0 6px; border-right: none; }
+.tab:last-child { border-radius: 0 6px 6px 0; }
+
+.tab.active {
+  color: var(--red);
+  background: var(--surface);
+  border-color: var(--red-dim);
+  box-shadow: 0 0 15px rgba(232,26,26,0.15);
+}
+
+.tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 20%;
+  right: 20%;
+  height: 2px;
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red-glow);
+}
+
+.tab:not(.active):hover {
+  color: var(--text);
+  background: var(--surface-alt);
+}
+
+/* ---- PANELS ---- */
+
+.panel {
+  display: none;
+  padding: 1.5rem 1.2rem 2rem;
+  max-width: 480px;
+  margin: 0 auto;
+  animation: fadeIn 0.3s ease;
+}
+
+.panel.active { display: block; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- SCORES TAB ---- */
+
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--red-dim);
+  margin-bottom: 0.8rem;
+  padding-left: 0.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.section-label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border), transparent);
+}
+
+.section + .section {
+  margin-top: 2rem;
+}
+
+.score-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.score-entry {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.2s ease;
+}
+
+.score-entry:hover {
+  border-color: var(--red-dim);
+}
+
+.score-rank {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  min-width: 1.5rem;
+  text-align: center;
+}
+
+.score-rank.gold { color: var(--gold); }
+.score-rank.silver { color: #888; }
+.score-rank.bronze { color: #8b5e3c; }
+
+.score-time {
+  font-family: 'Courier New', 'Consolas', monospace;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-left: 0.5rem;
+  min-width: 3.5rem;
+}
+
+.score-value {
+  margin-left: auto;
+  font-family: Impact, 'Arial Black', sans-serif;
+  font-size: 1.5rem;
+  letter-spacing: 0.05em;
+  color: var(--text);
+}
+
+.score-entry:first-child .score-value.best {
+  color: var(--gold);
+  text-shadow: 0 0 10px rgba(212,165,32,0.3);
+}
+
+.score-unit {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-left: 0.3rem;
+  align-self: flex-end;
+  margin-bottom: 0.25rem;
+  letter-spacing: 0.05em;
+}
+
+/* ---- STATS TAB ---- */
+
+.chart-container {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.2rem 1rem 0.8rem;
+  margin-top: 0.5rem;
+}
+
+.chart-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--red-dim);
+  margin-bottom: 1rem;
+  text-align: center;
+}
+
+canvas {
+  width: 100%;
+  height: 250px;
+  display: block;
+}
+
+.stats-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.6rem;
+  margin-top: 1.2rem;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 0.6rem;
+  text-align: center;
+}
+
+.stat-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.4rem;
+}
+
+.stat-value {
+  font-family: Impact, 'Arial Black', sans-serif;
+  font-size: 1.6rem;
+  color: var(--text);
+  letter-spacing: 0.03em;
+}
+
+.stat-card:first-child .stat-value {
+  color: var(--gold);
+  text-shadow: 0 0 10px rgba(212,165,32,0.2);
+}
+
+.stat-card:nth-child(2) .stat-value {
+  color: var(--red);
+}
+
+/* ---- EMPTY STATE ---- */
+
+.empty {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+}
+
+/* ---- LIVE INDICATOR ---- */
+
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--red);
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  box-shadow: 0 0 6px var(--red-glow);
+  animation: liveBlink 2s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+@keyframes liveBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.live-badge {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 0.35rem 0.7rem;
+  z-index: 10;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="title">BAPT'HIT</div>
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('scores')">Scores</button>
+    <button class="tab" onclick="switchTab('stats')">Stats</button>
+  </div>
+</div>
+
+<div id="scores-panel" class="panel active">
+  <div class="section">
+    <div class="section-label">Derniers Scores</div>
+    <div id="recent-scores" class="score-list">
+      <div class="empty">En attente des scores...</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-label">Meilleurs Scores</div>
+    <div id="best-scores" class="score-list">
+      <div class="empty">En attente des scores...</div>
+    </div>
+  </div>
+</div>
+
+<div id="stats-panel" class="panel">
+  <div class="chart-container">
+    <div class="chart-title">Scores au fil du temps</div>
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="stats-summary">
+    <div class="stat-card">
+      <div class="stat-label">Meilleur</div>
+      <div id="stat-best" class="stat-value">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total</div>
+      <div id="stat-count" class="stat-value">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Moyenne</div>
+      <div id="stat-avg" class="stat-value">-</div>
+    </div>
+  </div>
+</div>
+
+<div class="live-badge">
+  <span class="live-dot"></span>LIVE
+</div>
+
+<script>
+let allScores = [];
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', (tab === 'scores' && i === 0) || (tab === 'stats' && i === 1));
+  });
+  document.getElementById('scores-panel').classList.toggle('active', tab === 'scores');
+  document.getElementById('stats-panel').classList.toggle('active', tab === 'stats');
+  if (tab === 'stats') drawChart();
+}
+
+function renderScores(scores) {
+  // Recent: last 10, reverse chronological
+  const recent = scores.slice().reverse().slice(0, 10);
+  const recentEl = document.getElementById('recent-scores');
+  if (recent.length === 0) {
+    recentEl.innerHTML = '<div class="empty">En attente des scores...</div>';
+  } else {
+    recentEl.innerHTML = recent.map((s, i) =>
+      '<div class="score-entry">' +
+        '<span class="score-time">' + s.time + '</span>' +
+        '<span class="score-value">' + s.score + '</span>' +
+        '<span class="score-unit">pts</span>' +
+      '</div>'
+    ).join('');
+  }
+
+  // Best: top 5 sorted by score desc
+  const best = scores.slice().sort((a, b) => b.score - a.score).slice(0, 5);
+  const bestEl = document.getElementById('best-scores');
+  if (best.length === 0) {
+    bestEl.innerHTML = '<div class="empty">En attente des scores...</div>';
+  } else {
+    const rankClass = ['gold', 'silver', 'bronze', '', ''];
+    bestEl.innerHTML = best.map((s, i) =>
+      '<div class="score-entry">' +
+        '<span class="score-rank ' + rankClass[i] + '">#' + (i + 1) + '</span>' +
+        '<span class="score-time">' + s.time + '</span>' +
+        '<span class="score-value' + (i === 0 ? ' best' : '') + '">' + s.score + '</span>' +
+        '<span class="score-unit">pts</span>' +
+      '</div>'
+    ).join('');
+  }
+
+  // Stats summary
+  if (scores.length > 0) {
+    const maxScore = Math.max(...scores.map(s => s.score));
+    const avg = Math.round(scores.reduce((a, s) => a + s.score, 0) / scores.length);
+    document.getElementById('stat-best').textContent = maxScore;
+    document.getElementById('stat-count').textContent = scores.length;
+    document.getElementById('stat-avg').textContent = avg;
+  }
+}
+
+function drawChart() {
+  const canvas = document.getElementById('chart');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = (rect.width - 32) * dpr;
+  canvas.height = 250 * dpr;
+  canvas.style.width = (rect.width - 32) + 'px';
+  canvas.style.height = '250px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const w = rect.width - 32;
+  const h = 250;
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (allScores.length < 2) {
+    ctx.fillStyle = '#444';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Pas assez de donnees', w / 2, h / 2);
+    return;
+  }
+
+  const pad = { top: 15, right: 15, bottom: 35, left: 45 };
+  const cw = w - pad.left - pad.right;
+  const ch = h - pad.top - pad.bottom;
+
+  const scores = allScores;
+  const minScore = Math.min(...scores.map(s => s.score)) - 50;
+  const maxScore = Math.max(...scores.map(s => s.score)) + 50;
+
+  // Parse time to minutes for positioning
+  function timeToMin(t) {
+    const parts = t.split('h');
+    return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+  }
+
+  const times = scores.map(s => timeToMin(s.time));
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const timeRange = maxTime - minTime || 1;
+
+  function x(t) { return pad.left + ((t - minTime) / timeRange) * cw; }
+  function y(v) { return pad.top + ch - ((v - minScore) / (maxScore - minScore)) * ch; }
+
+  // Grid lines
+  ctx.strokeStyle = '#1e1e1e';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gy = pad.top + (ch / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, gy);
+    ctx.lineTo(pad.left + cw, gy);
+    ctx.stroke();
+
+    const val = Math.round(maxScore - (i / 4) * (maxScore - minScore));
+    ctx.fillStyle = '#444';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(val, pad.left - 8, gy + 3);
+  }
+
+  // Time axis labels
+  const labelTimes = [];
+  const firstH = Math.ceil(minTime / 60);
+  const lastH = Math.floor(maxTime / 60);
+  for (let hr = firstH; hr <= lastH; hr++) {
+    labelTimes.push(hr * 60);
+  }
+  ctx.fillStyle = '#555';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  labelTimes.forEach(t => {
+    const px = x(t);
+    if (px >= pad.left && px <= pad.left + cw) {
+      ctx.fillText(Math.floor(t / 60) + 'h', px, h - pad.bottom + 20);
+      ctx.strokeStyle = '#1a1a1a';
+      ctx.beginPath();
+      ctx.moveTo(px, pad.top);
+      ctx.lineTo(px, pad.top + ch);
+      ctx.stroke();
+    }
+  });
+
+  // Axes
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + ch);
+  ctx.lineTo(pad.left + cw, pad.top + ch);
+  ctx.stroke();
+
+  // Points array for drawing
+  const pts = scores.map(s => ({ px: x(timeToMin(s.time)), py: y(s.score) }));
+
+  // Smoothed trend line (bezier)
+  if (pts.length >= 2) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(232, 26, 26, 0.7)';
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = 'rgba(232, 26, 26, 0.4)';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].px, pts[0].py);
+    for (let i = 1; i < pts.length; i++) {
+      const prev = pts[i - 1];
+      const curr = pts[i];
+      const cpx = (prev.px + curr.px) / 2;
+      ctx.quadraticCurveTo(prev.px, prev.py, cpx, (prev.py + curr.py) / 2);
+    }
+    ctx.lineTo(pts[pts.length - 1].px, pts[pts.length - 1].py);
+    ctx.stroke();
+
+    // Gradient fill under curve
+    ctx.shadowBlur = 0;
+    ctx.lineTo(pts[pts.length - 1].px, pad.top + ch);
+    ctx.lineTo(pts[0].px, pad.top + ch);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+    grad.addColorStop(0, 'rgba(232, 26, 26, 0.15)');
+    grad.addColorStop(1, 'rgba(232, 26, 26, 0)');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Individual dots
+  pts.forEach((p, i) => {
+    ctx.beginPath();
+    ctx.arc(p.px, p.py, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#e8e8e8';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(232, 26, 26, 0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  });
+}
+
+async function fetchScores() {
+  try {
+    const res = await fetch('/api/scores');
+    const data = await res.json();
+    allScores = data.scores || [];
+    renderScores(allScores);
+    if (document.getElementById('stats-panel').classList.contains('active')) {
+      drawChart();
+    }
+  } catch (e) {
+    // silently retry on next poll
+  }
+}
+
+// Initial fetch and polling
+fetchScores();
+setInterval(fetchScores, 3000);
+
+// Redraw chart on resize
+window.addEventListener('resize', () => {
+  if (document.getElementById('stats-panel').classList.contains('active')) {
+    drawChart();
+  }
+});
+</script>
+
+</body>
+</html>

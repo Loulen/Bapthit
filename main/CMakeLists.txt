@@ -2,4 +2,5 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES esp_wifi esp_event nvs_flash esp_netif esp_http_server esp_app_format app_update
+    EMBED_TXTFILES "index.html"
 )
