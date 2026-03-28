@@ -346,12 +346,203 @@ canvas {
   padding: 0.35rem 0.7rem;
   z-index: 10;
 }
+
+/* ---- SETTINGS GEAR ---- */
+
+.gear-btn {
+  position: absolute;
+  top: 2.2rem;
+  right: 1.2rem;
+  width: 36px;
+  height: 36px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s ease;
+  color: var(--text-muted);
+}
+
+.gear-btn:hover {
+  border-color: var(--red-dim);
+  color: var(--text-dim);
+}
+
+.gear-btn.active {
+  border-color: var(--red-dim);
+  color: var(--red);
+  background: var(--surface);
+}
+
+.gear-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  transition: transform 0.4s ease;
+}
+
+.gear-btn:hover svg,
+.gear-btn.active svg {
+  transform: rotate(60deg);
+}
+
+/* ---- SETTINGS PANEL ---- */
+
+.settings-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.8);
+  z-index: 50;
+  animation: fadeIn 0.2s ease;
+}
+
+.settings-overlay.active { display: block; }
+
+.settings-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-height: 70vh;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  padding: 1.5rem 1.2rem 2rem;
+  z-index: 51;
+  transform: translateY(100%);
+  transition: transform 0.3s ease;
+  overflow-y: auto;
+}
+
+.settings-overlay.active .settings-sheet {
+  transform: translateY(0);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.settings-title {
+  font-family: Impact, 'Arial Black', sans-serif;
+  font-size: 1.3rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.settings-close {
+  width: 32px;
+  height: 32px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.settings-close:hover {
+  border-color: var(--red-dim);
+  color: var(--red);
+}
+
+/* ---- OTA UPDATE ---- */
+
+.ota-zone {
+  background: var(--bg);
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  padding: 2rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  position: relative;
+}
+
+.ota-zone:hover,
+.ota-zone.dragover {
+  border-color: var(--red-dim);
+  background: rgba(232,26,26,0.03);
+}
+
+.ota-zone.uploading {
+  pointer-events: none;
+  border-color: var(--red);
+}
+
+.ota-icon {
+  font-size: 2rem;
+  margin-bottom: 0.6rem;
+  color: var(--text-muted);
+}
+
+.ota-text {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+.ota-text strong {
+  color: var(--red);
+}
+
+.ota-input {
+  display: none;
+}
+
+.ota-progress {
+  display: none;
+  margin-top: 1.2rem;
+}
+
+.ota-progress.active { display: block; }
+
+.progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red-glow);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.ota-status {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 0.6rem;
+  letter-spacing: 0.05em;
+  text-align: center;
+}
+
+.ota-status.success { color: #2ecc40; }
+.ota-status.error { color: var(--red); }
 </style>
 </head>
 <body>
 
 <div class="header">
   <div class="title">BAPT'HIT</div>
+  <button class="gear-btn" id="gear-btn" onclick="toggleSettings()">
+    <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.6 3.6 0 0112 15.6z"/></svg>
+  </button>
   <div class="tabs">
     <button class="tab active" onclick="switchTab('scores')">Scores</button>
     <button class="tab" onclick="switchTab('stats')">Stats</button>
@@ -390,6 +581,25 @@ canvas {
     <div class="stat-card">
       <div class="stat-label">Moyenne</div>
       <div id="stat-avg" class="stat-value">-</div>
+    </div>
+  </div>
+</div>
+
+<div class="settings-overlay" id="settings-overlay" onclick="if(event.target===this)toggleSettings()">
+  <div class="settings-sheet">
+    <div class="settings-header">
+      <span class="settings-title">Parametres</span>
+      <button class="settings-close" onclick="toggleSettings()">&times;</button>
+    </div>
+    <div class="section-label">Mise a jour firmware</div>
+    <div class="ota-zone" id="ota-zone" onclick="document.getElementById('ota-input').click()">
+      <div class="ota-icon">&#8682;</div>
+      <div class="ota-text">Glisser un fichier <strong>.bin</strong> ici<br>ou appuyer pour selectionner</div>
+      <input type="file" id="ota-input" class="ota-input" accept=".bin" onchange="startOta(this.files[0])">
+    </div>
+    <div class="ota-progress" id="ota-progress">
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="ota-status" id="ota-status">Upload en cours...</div>
     </div>
   </div>
 </div>
@@ -618,6 +828,83 @@ window.addEventListener('resize', () => {
     drawChart();
   }
 });
+
+// ---- Settings ----
+
+function toggleSettings() {
+  const overlay = document.getElementById('settings-overlay');
+  const gear = document.getElementById('gear-btn');
+  overlay.classList.toggle('active');
+  gear.classList.toggle('active');
+}
+
+// ---- OTA Upload ----
+
+const otaZone = document.getElementById('ota-zone');
+otaZone.addEventListener('dragover', e => { e.preventDefault(); otaZone.classList.add('dragover'); });
+otaZone.addEventListener('dragleave', () => otaZone.classList.remove('dragover'));
+otaZone.addEventListener('drop', e => {
+  e.preventDefault();
+  otaZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) startOta(e.dataTransfer.files[0]);
+});
+
+async function startOta(file) {
+  if (!file || !file.name.endsWith('.bin')) {
+    alert('Selectionner un fichier .bin');
+    return;
+  }
+
+  const zone = document.getElementById('ota-zone');
+  const progress = document.getElementById('ota-progress');
+  const fill = document.getElementById('progress-fill');
+  const status = document.getElementById('ota-status');
+
+  zone.classList.add('uploading');
+  progress.classList.add('active');
+  status.className = 'ota-status';
+  status.textContent = 'Upload en cours... 0%';
+  fill.style.width = '0%';
+
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/ota', true);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        fill.style.width = pct + '%';
+        status.textContent = 'Upload en cours... ' + pct + '%';
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 200) {
+        fill.style.width = '100%';
+        status.className = 'ota-status success';
+        status.textContent = 'Mise a jour reussie ! Redemarrage...';
+        setTimeout(() => { location.reload(); }, 5000);
+      } else {
+        status.className = 'ota-status error';
+        status.textContent = 'Erreur: ' + (xhr.responseText || xhr.status);
+        zone.classList.remove('uploading');
+      }
+    };
+
+    xhr.onerror = () => {
+      status.className = 'ota-status error';
+      status.textContent = 'Erreur de connexion';
+      zone.classList.remove('uploading');
+    };
+
+    xhr.send(file);
+  } catch (e) {
+    status.className = 'ota-status error';
+    status.textContent = 'Erreur: ' + e.message;
+    zone.classList.remove('uploading');
+  }
+}
 </script>
 
 </body>

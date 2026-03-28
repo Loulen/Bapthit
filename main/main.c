@@ -10,6 +10,10 @@
 #include "esp_http_server.h"
 #include "esp_random.h"
 #include "nvs_flash.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "bapthit";
 
@@ -103,9 +107,110 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// OTA update handler — receives firmware binary via POST
+static esp_err_t ota_post_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "OTA update started, content length: %d", req->content_len);
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        ESP_LOGE(TAG, "OTA: no update partition found");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No update partition");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA: writing to partition '%s' at offset 0x%lx",
+             update_partition->label, update_partition->address);
+
+    esp_ota_handle_t ota_handle;
+    esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(4096);
+    if (!buf) {
+        esp_ota_abort(ota_handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    int remaining = req->content_len;
+    int received_total = 0;
+
+    while (remaining > 0) {
+        int received = httpd_req_recv(req, buf, (remaining < 4096) ? remaining : 4096);
+        if (received <= 0) {
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            ESP_LOGE(TAG, "OTA: receive error");
+            free(buf);
+            esp_ota_abort(ota_handle);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+            return ESP_FAIL;
+        }
+
+        err = esp_ota_write(ota_handle, buf, received);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OTA write failed: %s", esp_err_to_name(err));
+            free(buf);
+            esp_ota_abort(ota_handle);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
+            return ESP_FAIL;
+        }
+
+        remaining -= received;
+        received_total += received;
+
+        if (received_total % (64 * 1024) < 4096) {
+            ESP_LOGI(TAG, "OTA progress: %d/%d bytes", received_total, req->content_len);
+        }
+    }
+
+    free(buf);
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Validation failed");
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA set boot partition failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot failed");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA update successful! Rebooting in 1s...");
+    httpd_resp_sendstr(req, "OK");
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Captive portal: redirect all unknown URLs to root
+// Android checks: /generate_204, /gen_204, /connecttest.txt
+// iOS checks: /hotspot-detect.html
+// Windows checks: /ncsi.txt, /connecttest.txt
+static esp_err_t captive_redirect_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
+    config.max_uri_handlers = 10;
+    config.uri_match_fn = httpd_uri_match_wildcard;
     httpd_handle_t server = NULL;
 
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -127,8 +232,105 @@ static httpd_handle_t start_webserver(void)
     };
     httpd_register_uri_handler(server, &scores_uri);
 
+    const httpd_uri_t ota_uri = {
+        .uri = "/api/ota",
+        .method = HTTP_POST,
+        .handler = ota_post_handler,
+    };
+    httpd_register_uri_handler(server, &ota_uri);
+
+    // Captive portal catch-all: any other URL redirects to /
+    const httpd_uri_t captive_uri = {
+        .uri = "/*",
+        .method = HTTP_GET,
+        .handler = captive_redirect_handler,
+    };
+    httpd_register_uri_handler(server, &captive_uri);
+
     ESP_LOGI(TAG, "HTTP server started on port %d", config.server_port);
     return server;
+}
+
+// ---------------------------------------------------------------------------
+// Captive portal DNS server — resolves ALL domains to 192.168.4.1
+// ---------------------------------------------------------------------------
+
+#define DNS_PORT 53
+#define DNS_MAX_LEN 256
+
+static void dns_server_task(void *pvParameters)
+{
+    uint8_t rx_buf[DNS_MAX_LEN];
+    uint8_t tx_buf[DNS_MAX_LEN];
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "DNS: failed to create socket");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in server_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(DNS_PORT),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+
+    if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        ESP_LOGE(TAG, "DNS: bind failed");
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "DNS server started on port %d", DNS_PORT);
+
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+
+        int len = recvfrom(sock, rx_buf, DNS_MAX_LEN, 0,
+                           (struct sockaddr *)&client_addr, &addr_len);
+        if (len < 12) continue;  // minimum DNS header size
+
+        // Build DNS response: copy header + question, add answer
+        memcpy(tx_buf, rx_buf, len);
+
+        // Set response flags: QR=1, AA=1, RA=1
+        tx_buf[2] = 0x84;  // QR=1, Opcode=0, AA=1
+        tx_buf[3] = 0x00;  // RA=0, RCODE=0
+        // Set answer count to 1
+        tx_buf[6] = 0x00;
+        tx_buf[7] = 0x01;
+
+        int pos = len;
+
+        // Answer: pointer to question name + A record pointing to 192.168.4.1
+        tx_buf[pos++] = 0xC0;  // name pointer
+        tx_buf[pos++] = 0x0C;  // offset to question name
+        tx_buf[pos++] = 0x00;  // type A
+        tx_buf[pos++] = 0x01;
+        tx_buf[pos++] = 0x00;  // class IN
+        tx_buf[pos++] = 0x01;
+        tx_buf[pos++] = 0x00;  // TTL = 60 seconds
+        tx_buf[pos++] = 0x00;
+        tx_buf[pos++] = 0x00;
+        tx_buf[pos++] = 0x3C;
+        tx_buf[pos++] = 0x00;  // rdlength = 4
+        tx_buf[pos++] = 0x04;
+        tx_buf[pos++] = 192;   // 192.168.4.1
+        tx_buf[pos++] = 168;
+        tx_buf[pos++] = 4;
+        tx_buf[pos++] = 1;
+
+        sendto(sock, tx_buf, pos, 0,
+               (struct sockaddr *)&client_addr, addr_len);
+    }
+}
+
+static void start_dns_server(void)
+{
+    xTaskCreate(dns_server_task, "dns_server", 4096, NULL, 5, NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +408,10 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_ap();
 
-    // Generate mock data and start HTTP server
+    // Generate mock data and start servers
     generate_mock_scores();
     start_webserver();
+    start_dns_server();
 
     ESP_LOGI(TAG, "Running on partition: %s", running->label);
 }
