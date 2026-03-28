@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lsusb)",
+      "Read(//home/llenoir/.espressif/**)",
+      "Read(//home/llenoir/**)",
+      "Bash(dmesg)",
+      "Bash(source /home/llenoir/.espressif/v6.0/esp-idf/export.sh)",
+      "Bash(idf.py --version)",
+      "Bash(idf.py set-target:*)"
+    ]
+  }
+}
