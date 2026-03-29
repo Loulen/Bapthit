@@ -11,7 +11,8 @@
 
 // Mirrors PunchmeterConfig from punchmeter.h
 struct PunchmeterConfig {
-    unsigned long scoreRef;  // microseconds, default 500000
+    unsigned long maxScore;  // microseconds, scores faster than this get 999 (default 20000)
+    unsigned long minScore;  // microseconds, scores slower than this get 0 (default 500000)
 };
 
 void punchmeter_setup();

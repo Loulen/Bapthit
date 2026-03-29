@@ -41,10 +41,11 @@ static QueueHandle_t score_queue = NULL;
 
 // Shared config protected by mutex
 typedef struct {
-    unsigned long scoreRef;
+    unsigned long maxScore;
+    unsigned long minScore;
 } shared_config_t;
 
-static shared_config_t shared_config = { .scoreRef = 500000 };
+static shared_config_t shared_config = { .maxScore = 20000, .minScore = 500000 };
 static SemaphoreHandle_t config_mutex = NULL;
 
 // ---------------------------------------------------------------------------
@@ -125,7 +126,9 @@ static void punchmeter_task(void *arg)
     while (1) {
         // Check for config updates
         if (xSemaphoreTake(config_mutex, 0) == pdTRUE) {
-            PunchmeterConfig cfg = { .scoreRef = shared_config.scoreRef };
+            PunchmeterConfig cfg;
+            cfg.maxScore = shared_config.maxScore;
+            cfg.minScore = shared_config.minScore;
             punchmeter_set_config(&cfg);
             xSemaphoreGive(config_mutex);
         }
@@ -414,19 +417,33 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     }
     buf[ret] = '\0';
 
-    char *key = strstr(buf, "\"scoreRef\"");
+    xSemaphoreTake(config_mutex, portMAX_DELAY);
+
+    char *key = strstr(buf, "\"maxScore\"");
     if (key) {
         char *colon = strchr(key, ':');
         if (colon) {
             unsigned long val = strtoul(colon + 1, NULL, 10);
             if (val > 0) {
-                xSemaphoreTake(config_mutex, portMAX_DELAY);
-                shared_config.scoreRef = val;
-                xSemaphoreGive(config_mutex);
-                ESP_LOGI(TAG, "Config updated: scoreRef=%lu", val);
+                shared_config.maxScore = val;
+                ESP_LOGI(TAG, "Config updated: maxScore=%lu", val);
             }
         }
     }
+
+    key = strstr(buf, "\"minScore\"");
+    if (key) {
+        char *colon = strchr(key, ':');
+        if (colon) {
+            unsigned long val = strtoul(colon + 1, NULL, 10);
+            if (val > 0) {
+                shared_config.minScore = val;
+                ESP_LOGI(TAG, "Config updated: minScore=%lu", val);
+            }
+        }
+    }
+
+    xSemaphoreGive(config_mutex);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
