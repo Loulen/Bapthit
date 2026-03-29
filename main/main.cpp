@@ -346,6 +346,45 @@ static httpd_handle_t start_webserver(void)
 }
 
 // ---------------------------------------------------------------------------
+// Serial test input — send "SCORE:750" via serial to inject fake scores
+// ---------------------------------------------------------------------------
+
+static void serial_test_task(void *arg)
+{
+    char line[64];
+    int pos = 0;
+
+    ESP_LOGI(TAG, "Serial test input ready — send SCORE:<value> to inject scores");
+
+    while (1) {
+        int c = fgetc(stdin);
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            if (pos > 0) {
+                line[pos] = '\0';
+                if (strncmp(line, "SCORE:", 6) == 0) {
+                    int val = atoi(line + 6);
+                    if (val >= 0 && val <= 999) {
+                        score_event_t evt = {
+                            .score = val,
+                            .timestamp_ms = esp_timer_get_time() / 1000,
+                        };
+                        xQueueSend(score_queue, &evt, 0);
+                        ESP_LOGI(TAG, "Test score injected: %d", val);
+                    }
+                }
+                pos = 0;
+            }
+        } else if (pos < (int)sizeof(line) - 1) {
+            line[pos++] = (char)c;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Captive portal DNS server — resolves ALL domains to 192.168.4.1
 // ---------------------------------------------------------------------------
 
@@ -508,6 +547,9 @@ extern "C" void app_main(void)
     // Start servers
     start_webserver();
     start_dns_server();
+
+    // Start serial test input task
+    xTaskCreate(serial_test_task, "serial_test", 4096, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "Running on partition: %s", running->label);
 }
