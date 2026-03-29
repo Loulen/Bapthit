@@ -1,5 +1,5 @@
-# Thin alias component: makes the managed `espressif/arduino-esp32` component
-# available under the plain name "arduino" so that downstream components
-# (e.g. PunchMeter) can use `REQUIRES arduino` without knowing the registry name.
-
-idf_component_register(REQUIRES espressif__arduino-esp32)
+idf_component_register(
+    SRCS "Arduino.cpp"
+    INCLUDE_DIRS "."
+    REQUIRES esp_driver_gpio esp_timer freertos
+)
