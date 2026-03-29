@@ -147,7 +147,10 @@ async def upload_photo(score_id: int, photo: UploadFile = File(...)):
     """Phone uploads photo directly here."""
     # Save photo
     photo_path = PHOTOS_DIR / f"{score_id}.jpg"
-    contents = await photo.read()
+    MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10 MB
+    contents = await photo.read(MAX_PHOTO_SIZE + 1)
+    if len(contents) > MAX_PHOTO_SIZE:
+        raise HTTPException(status_code=413, detail="Photo too large (max 10 MB)")
     photo_path.write_bytes(contents)
 
     # Update DB
