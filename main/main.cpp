@@ -393,11 +393,91 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t backend_register_handler(httpd_req_t *req)
+{
+    char buf[128];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    char *ip_key = strstr(buf, "\"ip\"");
+    if (!ip_key) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing ip");
+        return ESP_FAIL;
+    }
+    char *ip_colon = strchr(ip_key, ':');
+    if (!ip_colon) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip");
+        return ESP_FAIL;
+    }
+    char *quote1 = strchr(ip_colon, '"');
+    if (!quote1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip");
+        return ESP_FAIL;
+    }
+    quote1++;
+    char *quote2 = strchr(quote1, '"');
+    if (!quote2 || (quote2 - quote1) >= (int)sizeof(laptop_ip)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip");
+        return ESP_FAIL;
+    }
+
+    int ip_len = quote2 - quote1;
+    memcpy(laptop_ip, quote1, ip_len);
+    laptop_ip[ip_len] = '\0';
+
+    ESP_LOGI(TAG, "Backend registered at %s", laptop_ip);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t photo_ok_handler(httpd_req_t *req)
+{
+    char buf[64];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    char *id_key = strstr(buf, "\"id\"");
+    if (!id_key) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id");
+        return ESP_FAIL;
+    }
+    char *colon = strchr(id_key, ':');
+    if (!colon) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid id");
+        return ESP_FAIL;
+    }
+    int id = atoi(colon + 1);
+
+    for (int i = 0; i < score_count; i++) {
+        if (scores[i].id == id) {
+            scores[i].has_photo = true;
+            ESP_LOGI(TAG, "Photo confirmed for score %d", id);
+            break;
+        }
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 16;
     config.uri_match_fn = httpd_uri_match_wildcard;
     httpd_handle_t server = NULL;
 
@@ -445,6 +525,22 @@ static httpd_handle_t start_webserver(void)
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &claim_uri);
+
+    const httpd_uri_t backend_uri = {
+        .uri = "/api/backend",
+        .method = HTTP_POST,
+        .handler = backend_register_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &backend_uri);
+
+    const httpd_uri_t photo_ok_uri = {
+        .uri = "/api/photo_ok",
+        .method = HTTP_POST,
+        .handler = photo_ok_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &photo_ok_uri);
 
     // Captive portal catch-all: any other URL redirects to /
     const httpd_uri_t captive_uri = {
