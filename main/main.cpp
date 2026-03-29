@@ -14,12 +14,37 @@
 #include "lwip/netdb.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "esp_timer.h"
+#include "punchmeter_api.h"
 
 static const char *TAG = "bapthit";
 
 #define WIFI_SSID "BAPTHIT"
 #define WIFI_CHANNEL 1
 #define MAX_STA_CONN 8
+
+// ---------------------------------------------------------------------------
+// PunchMeter integration — score queue + config
+// ---------------------------------------------------------------------------
+
+#define SCORE_QUEUE_SIZE 16
+
+typedef struct {
+    int score;
+    int64_t timestamp_ms;
+} score_event_t;
+
+static QueueHandle_t score_queue = NULL;
+
+// Shared config protected by mutex
+typedef struct {
+    unsigned long scoreRef;
+} shared_config_t;
+
+static shared_config_t shared_config = { .scoreRef = 500000 };
+static SemaphoreHandle_t config_mutex = NULL;
 
 // ---------------------------------------------------------------------------
 // Score store
@@ -46,35 +71,62 @@ static void add_score(int hour, int minute, int score)
     }
 }
 
-static int cmp_time(const void *a, const void *b)
-{
-    const score_entry_t *sa = (const score_entry_t *)a;
-    const score_entry_t *sb = (const score_entry_t *)b;
-    int ta = sa->hour * 60 + sa->minute;
-    int tb = sb->hour * 60 + sb->minute;
-    return ta - tb;
-}
+// ---------------------------------------------------------------------------
+// PunchMeter task (runs on core 1)
+// ---------------------------------------------------------------------------
 
-static void generate_mock_scores(void)
+static void punchmeter_task(void *arg)
 {
-    for (int i = 0; i < 15; i++) {
-        int hour = 13 + (int)(esp_random() % 10);   // 13h - 22h
-        int minute = (int)(esp_random() % 60);
-        int score = 400 + (int)(esp_random() % 800); // 400 - 1199
-        add_score(hour, minute, score);
+    punchmeter_setup();
+
+    int prev_score = -1;
+
+    while (1) {
+        // Check for config updates
+        if (xSemaphoreTake(config_mutex, 0) == pdTRUE) {
+            PunchmeterConfig cfg = { .scoreRef = shared_config.scoreRef };
+            punchmeter_set_config(&cfg);
+            xSemaphoreGive(config_mutex);
+        }
+
+        punchmeter_loop();
+
+        // Push new score to queue when it changes
+        int current_score = punchmeter_get_last_score();
+        if (current_score >= 0 && current_score != prev_score) {
+            score_event_t evt = {
+                .score = current_score,
+                .timestamp_ms = esp_timer_get_time() / 1000,
+            };
+            xQueueSend(score_queue, &evt, 0);
+            prev_score = current_score;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
-    qsort(scores, score_count, sizeof(score_entry_t), cmp_time);
-    ESP_LOGI(TAG, "Generated %d mock scores", score_count);
 }
 
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
 
+static void drain_score_queue(void)
+{
+    score_event_t evt;
+    while (xQueueReceive(score_queue, &evt, 0) == pdTRUE) {
+        int64_t total_minutes = evt.timestamp_ms / 60000;
+        int hour = (int)(total_minutes / 60) % 24;
+        int minute = (int)(total_minutes % 60);
+        add_score(hour, minute, evt.score);
+    }
+}
+
 static esp_err_t scores_get_handler(httpd_req_t *req)
 {
+    drain_score_queue();
+
     // Build JSON manually — avoids cJSON dependency
-    char *buf = malloc(2048);
+    char *buf = (char *)malloc(2048);
     if (!buf) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -130,7 +182,7 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    char *buf = malloc(4096);
+    char *buf = (char *)malloc(4096);
     if (!buf) {
         esp_ota_abort(ota_handle);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -222,6 +274,7 @@ static httpd_handle_t start_webserver(void)
         .uri = "/",
         .method = HTTP_GET,
         .handler = root_get_handler,
+        .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &root_uri);
 
@@ -229,6 +282,7 @@ static httpd_handle_t start_webserver(void)
         .uri = "/api/scores",
         .method = HTTP_GET,
         .handler = scores_get_handler,
+        .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &scores_uri);
 
@@ -236,6 +290,7 @@ static httpd_handle_t start_webserver(void)
         .uri = "/api/ota",
         .method = HTTP_POST,
         .handler = ota_post_handler,
+        .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &ota_uri);
 
@@ -244,6 +299,7 @@ static httpd_handle_t start_webserver(void)
         .uri = "/*",
         .method = HTTP_GET,
         .handler = captive_redirect_handler,
+        .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &captive_uri);
 
@@ -270,11 +326,10 @@ static void dns_server_task(void *pvParameters)
         return;
     }
 
-    struct sockaddr_in server_addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(DNS_PORT),
-        .sin_addr.s_addr = htonl(INADDR_ANY),
-    };
+    struct sockaddr_in server_addr = {};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(DNS_PORT);
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         ESP_LOGE(TAG, "DNS: bind failed");
@@ -359,15 +414,12 @@ static void wifi_init_ap(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                         &wifi_event_handler, NULL, NULL));
 
-    wifi_config_t wifi_config = {
-        .ap = {
-            .ssid = WIFI_SSID,
-            .ssid_len = strlen(WIFI_SSID),
-            .channel = WIFI_CHANNEL,
-            .max_connection = MAX_STA_CONN,
-            .authmode = WIFI_AUTH_OPEN,
-        },
-    };
+    wifi_config_t wifi_config = {};
+    memcpy(wifi_config.ap.ssid, WIFI_SSID, strlen(WIFI_SSID));
+    wifi_config.ap.ssid_len = strlen(WIFI_SSID);
+    wifi_config.ap.channel = WIFI_CHANNEL;
+    wifi_config.ap.max_connection = MAX_STA_CONN;
+    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
@@ -380,7 +432,7 @@ static void wifi_init_ap(void)
 // Main
 // ---------------------------------------------------------------------------
 
-void app_main(void)
+extern "C" void app_main(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     ESP_LOGI(TAG, "Bapthit firmware v%s started", app_desc->version);
@@ -408,8 +460,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_ap();
 
-    // Generate mock data and start servers
-    generate_mock_scores();
+    // Create PunchMeter communication primitives
+    score_queue = xQueueCreate(SCORE_QUEUE_SIZE, sizeof(score_event_t));
+    config_mutex = xSemaphoreCreateMutex();
+
+    // Start PunchMeter on core 1
+    xTaskCreatePinnedToCore(punchmeter_task, "punchmeter", 4096, NULL, 5, NULL, 1);
+
+    // Start servers
     start_webserver();
     start_dns_server();
 
