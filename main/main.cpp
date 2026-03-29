@@ -18,6 +18,7 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "punchmeter_api.h"
+#include "esp_http_client.h"
 
 static const char *TAG = "bapthit";
 
@@ -69,6 +70,25 @@ static int next_score_id = 1;
 // Laptop backend (empty = not registered)
 static char laptop_ip[16] = "";
 
+// Forwarding queue to laptop backend
+#define FWD_QUEUE_SIZE 16
+
+typedef enum {
+    FWD_SCORE,
+    FWD_CLAIM,
+} fwd_type_t;
+
+typedef struct {
+    fwd_type_t type;
+    int id;
+    int hour;
+    int minute;
+    int score;
+    char name[MAX_NAME_LEN];
+} fwd_event_t;
+
+static QueueHandle_t fwd_queue = NULL;
+
 static void add_score(int hour, int minute, int score)
 {
     if (score_count < MAX_SCORES) {
@@ -79,6 +99,16 @@ static void add_score(int hour, int minute, int score)
         scores[score_count].name[0] = '\0';
         scores[score_count].has_photo = false;
         score_count++;
+        // Forward to laptop
+        if (fwd_queue) {
+            fwd_event_t fwd = {};
+            fwd.type = FWD_SCORE;
+            fwd.id = scores[score_count - 1].id;
+            fwd.hour = hour;
+            fwd.minute = minute;
+            fwd.score = score;
+            xQueueSend(fwd_queue, &fwd, 0);
+        }
     }
 }
 
@@ -245,6 +275,16 @@ static esp_err_t claim_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    // Forward to laptop
+    if (fwd_queue) {
+        fwd_event_t fwd = {};
+        fwd.type = FWD_CLAIM;
+        fwd.id = id;
+        strncpy(fwd.name, scores[idx].name, MAX_NAME_LEN - 1);
+        fwd.name[MAX_NAME_LEN - 1] = '\0';
+        xQueueSend(fwd_queue, &fwd, 0);
+    }
+
     ESP_LOGI(TAG, "Score %d claimed by '%s'", id, scores[idx].name);
 
     httpd_resp_set_type(req, "application/json");
@@ -391,6 +431,55 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
+}
+
+static void forward_to_laptop(const char *path, const char *body)
+{
+    if (laptop_ip[0] == '\0') return;
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s:8000%s", laptop_ip, path);
+
+    esp_http_client_config_t config = {};
+    config.url = url;
+    config.method = HTTP_METHOD_POST;
+    config.timeout_ms = 3000;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, strlen(body));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Forward to %s failed: %s", url, esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void fwd_task(void *arg)
+{
+    fwd_event_t evt;
+    char body[192];
+
+    while (1) {
+        if (xQueueReceive(fwd_queue, &evt, portMAX_DELAY) == pdTRUE) {
+            if (laptop_ip[0] == '\0') continue;
+
+            switch (evt.type) {
+            case FWD_SCORE:
+                snprintf(body, sizeof(body),
+                    "{\"id\":%d,\"hour\":%d,\"minute\":%d,\"score\":%d}",
+                    evt.id, evt.hour, evt.minute, evt.score);
+                forward_to_laptop("/api/scores", body);
+                break;
+            case FWD_CLAIM:
+                snprintf(body, sizeof(body),
+                    "{\"id\":%d,\"name\":\"%s\"}", evt.id, evt.name);
+                forward_to_laptop("/api/scores/claim", body);
+                break;
+            }
+        }
+    }
 }
 
 static esp_err_t backend_register_handler(httpd_req_t *req)
@@ -750,6 +839,10 @@ extern "C" void app_main(void)
     // Create PunchMeter communication primitives
     score_queue = xQueueCreate(SCORE_QUEUE_SIZE, sizeof(score_event_t));
     config_mutex = xSemaphoreCreateMutex();
+
+    // Create forwarding queue and task
+    fwd_queue = xQueueCreate(FWD_QUEUE_SIZE, sizeof(fwd_event_t));
+    xTaskCreate(fwd_task, "fwd_task", 4096, NULL, 3, NULL);
 
     // Start PunchMeter on core 1
     xTaskCreatePinnedToCore(punchmeter_task, "punchmeter", 4096, NULL, 5, NULL, 1);
