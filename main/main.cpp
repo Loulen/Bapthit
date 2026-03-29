@@ -175,6 +175,7 @@ static esp_err_t scores_get_handler(httpd_req_t *req)
 
     int pos = sprintf(buf, "{\"scores\":[");
     for (int i = 0; i < score_count; i++) {
+        if (pos > 7800) break;  // safety margin
         if (i > 0) buf[pos++] = ',';
         pos += sprintf(buf + pos,
             "{\"id\":%d,\"time\":\"%02dh%02d\",\"score\":%d,\"name\":\"%s\",\"has_photo\":%s}",
@@ -539,37 +540,41 @@ static void fetch_history_from_laptop(void)
         score_entry_t *s = &scores[score_count];
         memset(s, 0, sizeof(*s));
 
+        // Find end of current JSON object
+        char *obj_end = strchr(p, '}');
+        if (!obj_end) break;
+
         // Parse id
         char *id_colon = strchr(p, ':');
-        if (id_colon) {
+        if (id_colon && id_colon < obj_end) {
             s->id = atoi(id_colon + 1);
             if (s->id >= next_score_id) next_score_id = s->id + 1;
         }
 
         // Parse hour
         char *h = strstr(p, "\"hour\"");
-        if (h) {
+        if (h && h < obj_end) {
             char *hc = strchr(h, ':');
             if (hc) s->hour = atoi(hc + 1);
         }
 
         // Parse minute
         char *m = strstr(p, "\"minute\"");
-        if (m) {
+        if (m && m < obj_end) {
             char *mc = strchr(m, ':');
             if (mc) s->minute = atoi(mc + 1);
         }
 
         // Parse score
         char *sc = strstr(p, "\"score\"");
-        if (sc) {
+        if (sc && sc < obj_end) {
             char *scc = strchr(sc, ':');
             if (scc) s->score = atoi(scc + 1);
         }
 
         // Parse name
         char *n = strstr(p, "\"name\"");
-        if (n) {
+        if (n && n < obj_end) {
             char *nc = strchr(n, ':');
             if (nc) {
                 char *q1 = strchr(nc, '"');
@@ -579,8 +584,13 @@ static void fetch_history_from_laptop(void)
                     if (q2) {
                         int len = q2 - q1;
                         if (len >= MAX_NAME_LEN) len = MAX_NAME_LEN - 1;
-                        memcpy(s->name, q1, len);
-                        s->name[len] = '\0';
+                        int dst = 0;
+                        for (int i = 0; i < len && dst < MAX_NAME_LEN - 1; i++) {
+                            if (q1[i] != '"' && q1[i] != '\\') {
+                                s->name[dst++] = q1[i];
+                            }
+                        }
+                        s->name[dst] = '\0';
                     }
                 }
             }
@@ -588,7 +598,7 @@ static void fetch_history_from_laptop(void)
 
         // Parse has_photo
         char *hp = strstr(p, "\"has_photo\"");
-        if (hp) {
+        if (hp && hp < obj_end) {
             char *hpc = strchr(hp, ':');
             if (hpc) {
                 char *val = hpc + 1;
@@ -638,6 +648,19 @@ static esp_err_t backend_register_handler(httpd_req_t *req)
     }
 
     int ip_len = quote2 - quote1;
+
+    // Validate IP: only digits and dots, exactly 3 dots
+    int dots = 0;
+    bool valid_ip = true;
+    for (int i = 0; i < ip_len; i++) {
+        if (quote1[i] == '.') dots++;
+        else if (quote1[i] < '0' || quote1[i] > '9') { valid_ip = false; break; }
+    }
+    if (!valid_ip || dots != 3) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip format");
+        return ESP_FAIL;
+    }
+
     memcpy(laptop_ip, quote1, ip_len);
     laptop_ip[ip_len] = '\0';
 
