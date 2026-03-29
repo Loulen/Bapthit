@@ -166,6 +166,93 @@ static esp_err_t scores_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t claim_post_handler(httpd_req_t *req)
+{
+    char buf[128];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    // Parse "id" field
+    char *id_key = strstr(buf, "\"id\"");
+    if (!id_key) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id");
+        return ESP_FAIL;
+    }
+    char *colon = strchr(id_key, ':');
+    if (!colon) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid id");
+        return ESP_FAIL;
+    }
+    int id = atoi(colon + 1);
+
+    // Parse "name" field
+    char *name_key = strstr(buf, "\"name\"");
+    if (!name_key) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing name");
+        return ESP_FAIL;
+    }
+    char *name_colon = strchr(name_key, ':');
+    if (!name_colon) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid name");
+        return ESP_FAIL;
+    }
+    char *quote1 = strchr(name_colon, '"');
+    if (!quote1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid name");
+        return ESP_FAIL;
+    }
+    quote1++; // skip opening quote
+    char *quote2 = strchr(quote1, '"');
+    if (!quote2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid name");
+        return ESP_FAIL;
+    }
+
+    // Find score by ID
+    int idx = -1;
+    for (int i = 0; i < score_count; i++) {
+        if (scores[i].id == id) { idx = i; break; }
+    }
+    if (idx < 0) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"Score not found\"}");
+        return ESP_OK;
+    }
+    if (scores[idx].name[0] != '\0') {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"Already claimed\"}");
+        return ESP_OK;
+    }
+
+    // Copy name, sanitizing JSON-breaking characters
+    int src_len = quote2 - quote1;
+    int dst = 0;
+    for (int i = 0; i < src_len && dst < MAX_NAME_LEN - 1; i++) {
+        char c = quote1[i];
+        if (c != '"' && c != '\\') {
+            scores[idx].name[dst++] = c;
+        }
+    }
+    scores[idx].name[dst] = '\0';
+    if (dst == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Name is empty");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Score %d claimed by '%s'", id, scores[idx].name);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // Embedded HTML file
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
@@ -350,6 +437,14 @@ static httpd_handle_t start_webserver(void)
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &config_uri);
+
+    const httpd_uri_t claim_uri = {
+        .uri = "/api/claim",
+        .method = HTTP_POST,
+        .handler = claim_post_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &claim_uri);
 
     // Captive portal catch-all: any other URL redirects to /
     const httpd_uri_t captive_uri = {
