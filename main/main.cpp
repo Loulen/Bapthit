@@ -482,6 +482,129 @@ static void fwd_task(void *arg)
     }
 }
 
+static void fetch_history_from_laptop(void)
+{
+    if (laptop_ip[0] == '\0') return;
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s:8000/api/scores/history", laptop_ip);
+
+    esp_http_client_config_t config = {};
+    config.url = url;
+    config.method = HTTP_METHOD_GET;
+    config.timeout_ms = 5000;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "History fetch failed to open: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    if (content_length <= 0 || content_length > 8192) {
+        ESP_LOGW(TAG, "History: bad content length %d", content_length);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    char *buf = (char *)malloc(content_length + 1);
+    if (!buf) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    int read_len = esp_http_client_read(client, buf, content_length);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (read_len <= 0) {
+        free(buf);
+        return;
+    }
+    buf[read_len] = '\0';
+
+    // Simple JSON array parser for:
+    // [{"id":1,"hour":14,"minute":32,"score":750,"name":"Lucas","has_photo":true}, ...]
+    score_count = 0;
+    next_score_id = 1;
+
+    char *p = buf;
+    while ((p = strstr(p, "\"id\"")) != NULL) {
+        if (score_count >= MAX_SCORES) break;
+
+        score_entry_t *s = &scores[score_count];
+        memset(s, 0, sizeof(*s));
+
+        // Parse id
+        char *id_colon = strchr(p, ':');
+        if (id_colon) {
+            s->id = atoi(id_colon + 1);
+            if (s->id >= next_score_id) next_score_id = s->id + 1;
+        }
+
+        // Parse hour
+        char *h = strstr(p, "\"hour\"");
+        if (h) {
+            char *hc = strchr(h, ':');
+            if (hc) s->hour = atoi(hc + 1);
+        }
+
+        // Parse minute
+        char *m = strstr(p, "\"minute\"");
+        if (m) {
+            char *mc = strchr(m, ':');
+            if (mc) s->minute = atoi(mc + 1);
+        }
+
+        // Parse score
+        char *sc = strstr(p, "\"score\"");
+        if (sc) {
+            char *scc = strchr(sc, ':');
+            if (scc) s->score = atoi(scc + 1);
+        }
+
+        // Parse name
+        char *n = strstr(p, "\"name\"");
+        if (n) {
+            char *nc = strchr(n, ':');
+            if (nc) {
+                char *q1 = strchr(nc, '"');
+                if (q1) {
+                    q1++;
+                    char *q2 = strchr(q1, '"');
+                    if (q2) {
+                        int len = q2 - q1;
+                        if (len >= MAX_NAME_LEN) len = MAX_NAME_LEN - 1;
+                        memcpy(s->name, q1, len);
+                        s->name[len] = '\0';
+                    }
+                }
+            }
+        }
+
+        // Parse has_photo
+        char *hp = strstr(p, "\"has_photo\"");
+        if (hp) {
+            char *hpc = strchr(hp, ':');
+            if (hpc) {
+                char *val = hpc + 1;
+                while (*val == ' ') val++;
+                s->has_photo = (strncmp(val, "true", 4) == 0);
+            }
+        }
+
+        score_count++;
+        p++; // advance past current match
+    }
+
+    ESP_LOGI(TAG, "Loaded %d scores from backend history", score_count);
+    free(buf);
+}
+
 static esp_err_t backend_register_handler(httpd_req_t *req)
 {
     char buf[128];
@@ -519,6 +642,9 @@ static esp_err_t backend_register_handler(httpd_req_t *req)
     laptop_ip[ip_len] = '\0';
 
     ESP_LOGI(TAG, "Backend registered at %s", laptop_ip);
+
+    // Fetch persisted scores from laptop
+    fetch_history_from_laptop();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
