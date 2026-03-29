@@ -439,7 +439,7 @@ static void forward_to_laptop(const char *path, const char *body)
     if (laptop_ip[0] == '\0') return;
 
     char url[64];
-    snprintf(url, sizeof(url), "http://%s:8000%s", laptop_ip, path);
+    snprintf(url, sizeof(url), "http://%s:6969%s", laptop_ip, path);
 
     esp_http_client_config_t config = {};
     config.url = url;
@@ -488,7 +488,7 @@ static void fetch_history_from_laptop(void)
     if (laptop_ip[0] == '\0') return;
 
     char url[64];
-    snprintf(url, sizeof(url), "http://%s:8000/api/scores/history", laptop_ip);
+    snprintf(url, sizeof(url), "http://%s:6969/api/scores/history", laptop_ip);
 
     esp_http_client_config_t config = {};
     config.url = url;

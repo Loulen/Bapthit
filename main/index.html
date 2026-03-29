@@ -818,7 +818,7 @@ function renderScores(scores) {
         ? '<span class="score-name anonymous">???</span>'
         : '<span class="score-name">' + esc(s.name) + '</span>';
       const avatarHtml = (s.has_photo && laptopIp)
-        ? '<img class="score-avatar" src="http://' + laptopIp + ':8000/api/photos/' + s.id + '">'
+        ? '<img class="score-avatar" src="http://' + laptopIp + ':6969/api/photos/' + s.id + '">'
         : '';
       return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
         + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
@@ -844,7 +844,7 @@ function renderScores(scores) {
         ? '<span class="score-name anonymous">???</span>'
         : '<span class="score-name">' + esc(s.name) + '</span>';
       const avatarHtml = (s.has_photo && laptopIp)
-        ? '<img class="score-avatar" src="http://' + laptopIp + ':8000/api/photos/' + s.id + '">'
+        ? '<img class="score-avatar" src="http://' + laptopIp + ':6969/api/photos/' + s.id + '">'
         : '';
       return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
         + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
@@ -1063,7 +1063,7 @@ async function saveClaim() {
       const formData = new FormData();
       formData.append('photo', claimPhotoFile);
       try {
-        await fetch('http://' + laptopIp + ':8000/api/photos/' + claimingId, {
+        await fetch('http://' + laptopIp + ':6969/api/photos/' + claimingId, {
           method: 'POST',
           body: formData
         });
