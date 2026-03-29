@@ -2,7 +2,7 @@ PORT ?= /dev/ttyUSB0
 BAUD ?= 115200
 IDF_ENV = . $(HOME)/.espressif/v6.0/esp-idf/export.sh 2>/dev/null
 
-.PHONY: build flash monitor flash-monitor serial-fill backend backend-install clean
+.PHONY: build flash monitor flash-monitor serial-fill backend backend-install backend-stop clean
 
 ## ESP32 firmware
 
@@ -54,6 +54,9 @@ backend-install: $(VENV)/bin/python
 
 backend: $(VENV)/bin/python
 	$(VENV)/bin/python backend/server.py
+
+backend-stop:
+	@pkill -f "backend/server.py" && echo "Backend stopped" || echo "Backend not running"
 
 ## Housekeeping
 
