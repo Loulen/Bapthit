@@ -257,6 +257,36 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t config_post_handler(httpd_req_t *req)
+{
+    char buf[128];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    char *key = strstr(buf, "\"scoreRef\"");
+    if (key) {
+        char *colon = strchr(key, ':');
+        if (colon) {
+            unsigned long val = strtoul(colon + 1, NULL, 10);
+            if (val > 0) {
+                xSemaphoreTake(config_mutex, portMAX_DELAY);
+                shared_config.scoreRef = val;
+                xSemaphoreGive(config_mutex);
+                ESP_LOGI(TAG, "Config updated: scoreRef=%lu", val);
+            }
+        }
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -293,6 +323,14 @@ static httpd_handle_t start_webserver(void)
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &ota_uri);
+
+    const httpd_uri_t config_uri = {
+        .uri = "/api/config",
+        .method = HTTP_POST,
+        .handler = config_post_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &config_uri);
 
     // Captive portal catch-all: any other URL redirects to /
     const httpd_uri_t captive_uri = {
