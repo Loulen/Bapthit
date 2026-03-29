@@ -534,6 +534,160 @@ canvas {
 
 .ota-status.success { color: #2ecc40; }
 .ota-status.error { color: var(--red); }
+
+/* ---- CLAIM MODAL ---- */
+
+.claim-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.8);
+  z-index: 60;
+  animation: fadeIn 0.2s ease;
+}
+
+.claim-overlay.active { display: flex; align-items: center; justify-content: center; }
+
+.claim-sheet {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  width: 90%;
+  max-width: 340px;
+}
+
+.claim-title {
+  font-family: Impact, 'Arial Black', sans-serif;
+  font-size: 1.2rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  margin-bottom: 0.3rem;
+}
+
+.claim-score-display {
+  font-family: Impact, 'Arial Black', sans-serif;
+  font-size: 2rem;
+  color: var(--red);
+  text-shadow: 0 0 10px rgba(232,26,26,0.4);
+  margin-bottom: 1rem;
+}
+
+.claim-input {
+  width: 100%;
+  padding: 0.7rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 1rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.claim-input:focus { border-color: var(--red-dim); }
+
+.claim-input::placeholder { color: var(--text-muted); }
+
+.claim-photo-row {
+  display: none;
+  margin-top: 0.8rem;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.claim-photo-row.visible { display: flex; }
+
+.claim-photo-btn {
+  padding: 0.5rem 1rem;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.claim-photo-btn:hover { border-color: var(--red-dim); color: var(--text); }
+
+.claim-photo-preview {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  display: none;
+  border: 1px solid var(--border);
+}
+
+.claim-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1.2rem;
+}
+
+.claim-btn {
+  flex: 1;
+  padding: 0.7rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid var(--border);
+}
+
+.claim-btn.cancel {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.claim-btn.cancel:hover { border-color: var(--text-muted); color: var(--text); }
+
+.claim-btn.save {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.claim-btn.save:hover { background: var(--red-glow); }
+
+.claim-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Unclaimed score styling */
+.score-entry.unclaimed { cursor: pointer; }
+.score-entry.unclaimed:hover { border-color: var(--red); }
+
+.score-name {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-left: 0.6rem;
+  max-width: 5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-name.anonymous {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.score-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  margin-left: 0.5rem;
+  border: 1px solid var(--border);
+}
 </style>
 </head>
 <body>
@@ -604,12 +758,32 @@ canvas {
   </div>
 </div>
 
+<div class="claim-overlay" id="claim-overlay" onclick="if(event.target===this)closeClaim()">
+  <div class="claim-sheet">
+    <div class="claim-title">Revendiquer ce score</div>
+    <div class="claim-score-display" id="claim-score-display">-</div>
+    <input class="claim-input" id="claim-name" type="text" placeholder="Ton nom..." maxlength="31" autocomplete="off">
+    <div class="claim-photo-row" id="claim-photo-row">
+      <button class="claim-photo-btn" onclick="document.getElementById('claim-photo-input').click()">Photo</button>
+      <input type="file" id="claim-photo-input" accept="image/*" capture="environment" style="display:none" onchange="previewClaimPhoto(this)">
+      <img class="claim-photo-preview" id="claim-photo-preview">
+    </div>
+    <div class="claim-actions">
+      <button class="claim-btn cancel" onclick="closeClaim()">Annuler</button>
+      <button class="claim-btn save" id="claim-save-btn" onclick="saveClaim()" disabled>Valider</button>
+    </div>
+  </div>
+</div>
+
 <div class="live-badge">
   <span class="live-dot"></span>LIVE
 </div>
 
 <script>
 let allScores = [];
+let laptopIp = null;
+let claimingId = null;
+let claimPhotoFile = null;
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach((t, i) => {
@@ -620,6 +794,12 @@ function switchTab(tab) {
   if (tab === 'stats') drawChart();
 }
 
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
 function renderScores(scores) {
   // Recent: last 10, reverse chronological
   const recent = scores.slice().reverse().slice(0, 10);
@@ -627,13 +807,23 @@ function renderScores(scores) {
   if (recent.length === 0) {
     recentEl.innerHTML = '<div class="empty">En attente des scores...</div>';
   } else {
-    recentEl.innerHTML = recent.map((s, i) =>
-      '<div class="score-entry">' +
-        '<span class="score-time">' + s.time + '</span>' +
-        '<span class="score-value">' + s.score + '</span>' +
-        '<span class="score-unit">pts</span>' +
-      '</div>'
-    ).join('');
+    recentEl.innerHTML = recent.map(s => {
+      const unclaimed = !s.name;
+      const nameHtml = unclaimed
+        ? '<span class="score-name anonymous">???</span>'
+        : '<span class="score-name">' + esc(s.name) + '</span>';
+      const avatarHtml = (s.has_photo && laptopIp)
+        ? '<img class="score-avatar" src="http://' + laptopIp + ':8000/api/photos/' + s.id + '">'
+        : '';
+      return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
+        + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
+        + avatarHtml
+        + nameHtml
+        + '<span class="score-time">' + s.time + '</span>'
+        + '<span class="score-value">' + s.score + '</span>'
+        + '<span class="score-unit">pts</span>'
+        + '</div>';
+    }).join('');
   }
 
   // Best: top 5 sorted by score desc
@@ -643,14 +833,24 @@ function renderScores(scores) {
     bestEl.innerHTML = '<div class="empty">En attente des scores...</div>';
   } else {
     const rankClass = ['gold', 'silver', 'bronze', '', ''];
-    bestEl.innerHTML = best.map((s, i) =>
-      '<div class="score-entry">' +
-        '<span class="score-rank ' + rankClass[i] + '">#' + (i + 1) + '</span>' +
-        '<span class="score-time">' + s.time + '</span>' +
-        '<span class="score-value' + (i === 0 ? ' best' : '') + '">' + s.score + '</span>' +
-        '<span class="score-unit">pts</span>' +
-      '</div>'
-    ).join('');
+    bestEl.innerHTML = best.map((s, i) => {
+      const unclaimed = !s.name;
+      const nameHtml = unclaimed
+        ? '<span class="score-name anonymous">???</span>'
+        : '<span class="score-name">' + esc(s.name) + '</span>';
+      const avatarHtml = (s.has_photo && laptopIp)
+        ? '<img class="score-avatar" src="http://' + laptopIp + ':8000/api/photos/' + s.id + '">'
+        : '';
+      return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
+        + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
+        + '<span class="score-rank ' + rankClass[i] + '">#' + (i + 1) + '</span>'
+        + avatarHtml
+        + nameHtml
+        + '<span class="score-time">' + s.time + '</span>'
+        + '<span class="score-value' + (i === 0 ? ' best' : '') + '">' + s.score + '</span>'
+        + '<span class="score-unit">pts</span>'
+        + '</div>';
+    }).join('');
   }
 
   // Stats summary
@@ -695,7 +895,6 @@ function drawChart() {
   const minScore = Math.min(...scores.map(s => s.score)) - 50;
   const maxScore = Math.max(...scores.map(s => s.score)) + 50;
 
-  // Parse time to minutes for positioning
   function timeToMin(t) {
     const parts = t.split('h');
     return parseInt(parts[0]) * 60 + parseInt(parts[1]);
@@ -709,7 +908,6 @@ function drawChart() {
   function x(t) { return pad.left + ((t - minTime) / timeRange) * cw; }
   function y(v) { return pad.top + ch - ((v - minScore) / (maxScore - minScore)) * ch; }
 
-  // Grid lines
   ctx.strokeStyle = '#1e1e1e';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
@@ -726,7 +924,6 @@ function drawChart() {
     ctx.fillText(val, pad.left - 8, gy + 3);
   }
 
-  // Time axis labels
   const labelTimes = [];
   const firstH = Math.ceil(minTime / 60);
   const lastH = Math.floor(maxTime / 60);
@@ -748,7 +945,6 @@ function drawChart() {
     }
   });
 
-  // Axes
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -757,10 +953,8 @@ function drawChart() {
   ctx.lineTo(pad.left + cw, pad.top + ch);
   ctx.stroke();
 
-  // Points array for drawing
   const pts = scores.map(s => ({ px: x(timeToMin(s.time)), py: y(s.score) }));
 
-  // Smoothed trend line (bezier)
   if (pts.length >= 2) {
     ctx.save();
     ctx.strokeStyle = 'rgba(232, 26, 26, 0.7)';
@@ -779,7 +973,6 @@ function drawChart() {
     ctx.lineTo(pts[pts.length - 1].px, pts[pts.length - 1].py);
     ctx.stroke();
 
-    // Gradient fill under curve
     ctx.shadowBlur = 0;
     ctx.lineTo(pts[pts.length - 1].px, pad.top + ch);
     ctx.lineTo(pts[0].px, pad.top + ch);
@@ -792,7 +985,6 @@ function drawChart() {
     ctx.restore();
   }
 
-  // Individual dots
   pts.forEach((p, i) => {
     ctx.beginPath();
     ctx.arc(p.px, p.py, 4, 0, Math.PI * 2);
@@ -804,11 +996,95 @@ function drawChart() {
   });
 }
 
+// ---- Claim Modal ----
+
+function openClaim(id, score) {
+  claimingId = id;
+  claimPhotoFile = null;
+  document.getElementById('claim-score-display').textContent = score + ' pts';
+  document.getElementById('claim-name').value = '';
+  document.getElementById('claim-save-btn').disabled = true;
+  document.getElementById('claim-photo-preview').style.display = 'none';
+  document.getElementById('claim-photo-input').value = '';
+
+  const photoRow = document.getElementById('claim-photo-row');
+  photoRow.classList.toggle('visible', !!laptopIp);
+
+  document.getElementById('claim-overlay').classList.add('active');
+  document.getElementById('claim-name').focus();
+}
+
+function closeClaim() {
+  document.getElementById('claim-overlay').classList.remove('active');
+  claimingId = null;
+  claimPhotoFile = null;
+}
+
+document.getElementById('claim-name').addEventListener('input', function() {
+  document.getElementById('claim-save-btn').disabled = !this.value.trim();
+});
+
+function previewClaimPhoto(input) {
+  if (input.files && input.files[0]) {
+    claimPhotoFile = input.files[0];
+    const preview = document.getElementById('claim-photo-preview');
+    preview.src = URL.createObjectURL(claimPhotoFile);
+    preview.style.display = 'block';
+  }
+}
+
+async function saveClaim() {
+  const name = document.getElementById('claim-name').value.trim();
+  if (!name || claimingId === null) return;
+
+  const btn = document.getElementById('claim-save-btn');
+  btn.disabled = true;
+  btn.textContent = '...';
+
+  try {
+    const res = await fetch('/api/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: claimingId, name: name })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert(err.error || 'Erreur');
+      return;
+    }
+
+    if (claimPhotoFile && laptopIp) {
+      const formData = new FormData();
+      formData.append('photo', claimPhotoFile);
+      try {
+        await fetch('http://' + laptopIp + ':8000/api/photos/' + claimingId, {
+          method: 'POST',
+          body: formData
+        });
+      } catch (e) {
+        console.warn('Photo upload failed:', e);
+      }
+    }
+
+    closeClaim();
+    fetchScores();
+  } catch (e) {
+    alert('Erreur de connexion');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Valider';
+  }
+}
+
+// ---- Fetch & Poll ----
+
 async function fetchScores() {
   try {
     const res = await fetch('/api/scores');
     const data = await res.json();
     allScores = data.scores || [];
+    laptopIp = data.laptop_ip || null;
     renderScores(allScores);
     if (document.getElementById('stats-panel').classList.contains('active')) {
       drawChart();
@@ -818,11 +1094,9 @@ async function fetchScores() {
   }
 }
 
-// Initial fetch and polling
 fetchScores();
 setInterval(fetchScores, 3000);
 
-// Redraw chart on resize
 window.addEventListener('resize', () => {
   if (document.getElementById('stats-panel').classList.contains('active')) {
     drawChart();
