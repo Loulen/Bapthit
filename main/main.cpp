@@ -51,22 +51,33 @@ static SemaphoreHandle_t config_mutex = NULL;
 // ---------------------------------------------------------------------------
 
 #define MAX_SCORES 64
+#define MAX_NAME_LEN 32
 
 typedef struct {
+    int id;
     int hour;
     int minute;
     int score;
+    char name[MAX_NAME_LEN];  // empty = unclaimed
+    bool has_photo;
 } score_entry_t;
 
 static score_entry_t scores[MAX_SCORES];
 static int score_count = 0;
+static int next_score_id = 1;
+
+// Laptop backend (empty = not registered)
+static char laptop_ip[16] = "";
 
 static void add_score(int hour, int minute, int score)
 {
     if (score_count < MAX_SCORES) {
+        scores[score_count].id = next_score_id++;
         scores[score_count].hour = hour;
         scores[score_count].minute = minute;
         scores[score_count].score = score;
+        scores[score_count].name[0] = '\0';
+        scores[score_count].has_photo = false;
         score_count++;
     }
 }
@@ -125,8 +136,8 @@ static esp_err_t scores_get_handler(httpd_req_t *req)
 {
     drain_score_queue();
 
-    // Build JSON manually — avoids cJSON dependency
-    char *buf = (char *)malloc(2048);
+    // Larger buffer: id + name + has_photo per entry
+    char *buf = (char *)malloc(8192);
     if (!buf) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -135,10 +146,18 @@ static esp_err_t scores_get_handler(httpd_req_t *req)
     int pos = sprintf(buf, "{\"scores\":[");
     for (int i = 0; i < score_count; i++) {
         if (i > 0) buf[pos++] = ',';
-        pos += sprintf(buf + pos, "{\"time\":\"%02dh%02d\",\"score\":%d}",
-                       scores[i].hour, scores[i].minute, scores[i].score);
+        pos += sprintf(buf + pos,
+            "{\"id\":%d,\"time\":\"%02dh%02d\",\"score\":%d,\"name\":\"%s\",\"has_photo\":%s}",
+            scores[i].id,
+            scores[i].hour, scores[i].minute,
+            scores[i].score,
+            scores[i].name,
+            scores[i].has_photo ? "true" : "false");
     }
-    pos += sprintf(buf + pos, "]}");
+    pos += sprintf(buf + pos, "],\"laptop_ip\":%s%s%s}",
+        laptop_ip[0] ? "\"" : "null",
+        laptop_ip[0] ? laptop_ip : "",
+        laptop_ip[0] ? "\"" : "");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
