@@ -755,6 +755,11 @@ canvas {
       <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
       <div class="ota-status" id="ota-status">Upload en cours...</div>
     </div>
+    <div class="section-label" style="margin-top:1.5rem">Backend</div>
+    <div id="backend-status" style="display:flex;align-items:center;gap:0.6rem;padding:0.8rem 1rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
+      <span id="backend-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex-shrink:0;"></span>
+      <span id="backend-text" style="font-size:0.85rem;color:var(--text-dim);">Non connecte</span>
+    </div>
   </div>
 </div>
 
@@ -1085,6 +1090,20 @@ async function fetchScores() {
     const data = await res.json();
     allScores = data.scores || [];
     laptopIp = data.laptop_ip || null;
+    // Update backend status in settings
+    const dot = document.getElementById('backend-dot');
+    const txt = document.getElementById('backend-text');
+    if (laptopIp) {
+      dot.style.background = '#2ecc40';
+      dot.style.boxShadow = '0 0 6px #2ecc40';
+      txt.style.color = 'var(--text)';
+      txt.textContent = 'Connecte (' + laptopIp + ')';
+    } else {
+      dot.style.background = 'var(--text-muted)';
+      dot.style.boxShadow = 'none';
+      txt.style.color = 'var(--text-dim)';
+      txt.textContent = 'Non connecte';
+    }
     renderScores(allScores);
     if (document.getElementById('stats-panel').classList.contains('active')) {
       drawChart();
