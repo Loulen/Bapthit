@@ -1,5 +1,6 @@
 import asyncio
 import json
+import socket as _socket
 import sqlite3
 from collections import deque
 from datetime import datetime
@@ -10,6 +11,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from zeroconf import ServiceInfo
+from zeroconf.asyncio import AsyncZeroconf
 
 PHOTOS_DIR = Path(__file__).parent / "photos"
 DB_PATH = Path(__file__).parent / "bapthit.db"
@@ -112,11 +115,44 @@ def save_config(updates: dict) -> dict:
     return load_config()
 
 
+MDNS_SERVICE_TYPE = "_bapthit._tcp.local."
+MDNS_NAME = "bapthit-server"
+MDNS_PORT = 6969
+
+
+def _local_ip() -> str:
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     PHOTOS_DIR.mkdir(exist_ok=True)
-    yield
+
+    ip = _local_ip()
+    print(f"Publishing mDNS: {MDNS_NAME}.local -> {ip}:{MDNS_PORT}")
+    aiozc = AsyncZeroconf()
+    info = ServiceInfo(
+        MDNS_SERVICE_TYPE,
+        f"{MDNS_NAME}.{MDNS_SERVICE_TYPE}",
+        addresses=[_socket.inet_aton(ip)],
+        port=MDNS_PORT,
+        server=f"{MDNS_NAME}.local.",
+        properties={},
+    )
+    await aiozc.async_register_service(info)
+    try:
+        yield
+    finally:
+        await aiozc.async_unregister_service(info)
+        await aiozc.async_close()
 
 
 app = FastAPI(lifespan=lifespan)
