@@ -93,6 +93,42 @@ static int next_score_id = 1;
 static char laptop_ip[16] = "";
 
 // ---------------------------------------------------------------------------
+// Punchmeter log ring buffer
+// ---------------------------------------------------------------------------
+
+#define LOG_BUF_SIZE 64
+#define LOG_MSG_LEN  120
+
+typedef struct {
+    uint32_t seq;      // monotonic, 0 = empty slot
+    uint32_t ts_ms;
+    char     msg[LOG_MSG_LEN];
+} log_entry_t;
+
+static log_entry_t log_buf[LOG_BUF_SIZE];
+static int         log_head = 0;
+static uint32_t    log_next_seq = 1;
+static SemaphoreHandle_t log_mutex = NULL;
+
+static void pm_log_sink(const char *msg)
+{
+    if (!log_mutex) return;
+    xSemaphoreTake(log_mutex, portMAX_DELAY);
+    log_entry_t *e = &log_buf[log_head];
+    e->seq = log_next_seq++;
+    e->ts_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    int j = 0;
+    for (int i = 0; msg[i] && j < LOG_MSG_LEN - 1; i++) {
+        char c = msg[i];
+        if (c != '"' && c != '\\' && c >= 0x20) e->msg[j++] = c;
+    }
+    e->msg[j] = '\0';
+    log_head = (log_head + 1) % LOG_BUF_SIZE;
+    xSemaphoreGive(log_mutex);
+    ESP_LOGI("PM", "%s", msg);
+}
+
+// ---------------------------------------------------------------------------
 // Wall-clock sync — one-shot from backend register
 // ---------------------------------------------------------------------------
 
@@ -528,6 +564,54 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t logs_get_handler(httpd_req_t *req)
+{
+    uint32_t since = 0;
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+            char val[16];
+            if (httpd_query_key_value(query, "since", val, sizeof(val)) == ESP_OK) {
+                since = strtoul(val, NULL, 10);
+            }
+        }
+    }
+
+    char *buf = (char *)malloc(12288);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    int pos = sprintf(buf, "{\"logs\":[");
+    bool first = true;
+
+    xSemaphoreTake(log_mutex, portMAX_DELAY);
+    // Iterate oldest → newest: the slot at log_head is the next one to
+    // overwrite, so in a full buffer it is the oldest entry.
+    for (int i = 0; i < LOG_BUF_SIZE; i++) {
+        int idx = (log_head + i) % LOG_BUF_SIZE;
+        log_entry_t *e = &log_buf[idx];
+        if (e->seq == 0 || e->seq <= since) continue;
+        if (pos > 11800) break;  // safety margin
+        if (!first) buf[pos++] = ',';
+        first = false;
+        pos += sprintf(buf + pos,
+            "{\"s\":%u,\"t\":%u,\"m\":\"%s\"}",
+            (unsigned)e->seq, (unsigned)e->ts_ms, e->msg);
+    }
+    xSemaphoreGive(log_mutex);
+
+    pos += sprintf(buf + pos, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, pos);
+    free(buf);
+    return ESP_OK;
+}
+
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
     xSemaphoreTake(config_mutex, portMAX_DELAY);
@@ -895,6 +979,14 @@ static httpd_handle_t start_webserver(void)
     };
     httpd_register_uri_handler(server, &config_get_uri);
 
+    const httpd_uri_t logs_get_uri = {
+        .uri = "/api/logs",
+        .method = HTTP_GET,
+        .handler = logs_get_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &logs_get_uri);
+
     const httpd_uri_t claim_uri = {
         .uri = "/api/claim",
         .method = HTTP_POST,
@@ -1127,6 +1219,8 @@ extern "C" void app_main(void)
     // Create PunchMeter communication primitives
     score_queue = xQueueCreate(SCORE_QUEUE_SIZE, sizeof(score_event_t));
     config_mutex = xSemaphoreCreateMutex();
+    log_mutex = xSemaphoreCreateMutex();
+    punchmeter_set_logger(pm_log_sink);
 
     // Create forwarding queue and task
     fwd_queue = xQueueCreate(FWD_QUEUE_SIZE, sizeof(fwd_event_t));

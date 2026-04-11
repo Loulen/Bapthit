@@ -29,4 +29,7 @@ void punchmeter_loop();
 int  punchmeter_get_last_score();
 void punchmeter_set_config(const PunchmeterConfig *cfg);
 
+typedef void (*punchmeter_log_fn)(const char *msg);
+void punchmeter_set_logger(punchmeter_log_fn fn);
+
 #endif // PUNCHMETER_API_H
