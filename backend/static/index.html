@@ -924,22 +924,7 @@ canvas {
       <span class="settings-title">Parametres</span>
       <button class="settings-close" onclick="toggleSettings()">&times;</button>
     </div>
-    <div class="section-label">Mise a jour firmware</div>
-    <div class="ota-zone" id="ota-zone" onclick="document.getElementById('ota-input').click()">
-      <div class="ota-icon">&#8682;</div>
-      <div class="ota-text">Glisser un fichier <strong>.bin</strong> ici<br>ou appuyer pour selectionner</div>
-      <input type="file" id="ota-input" class="ota-input" accept=".bin" onchange="startOta(this.files[0])">
-    </div>
-    <div class="ota-progress" id="ota-progress">
-      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-      <div class="ota-status" id="ota-status">Upload en cours...</div>
-    </div>
-    <div class="section-label" style="margin-top:1.5rem">Backend</div>
-    <div id="backend-status" style="display:flex;align-items:center;gap:0.6rem;padding:0.8rem 1rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
-      <span id="backend-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex-shrink:0;"></span>
-      <span id="backend-text" style="font-size:0.85rem;color:var(--text-dim);">Non connecte</span>
-    </div>
-    <div class="section-label" style="margin-top:1.5rem">Config PunchMeter</div>
+    <div class="section-label">Config PunchMeter</div>
     <div class="config-form" id="config-form">
       <label for="cfg-maxScore">Max score (&micro;s)</label>
       <input type="number" id="cfg-maxScore" min="1">
@@ -1010,7 +995,6 @@ canvas {
 
 <script>
 let allScores = [];
-let laptopIp = null;
 let claimingId = null;
 let claimPhotoFile = null;
 
@@ -1041,8 +1025,8 @@ function renderScores(scores) {
       const nameHtml = unclaimed
         ? '<span class="score-name anonymous">???</span>'
         : '<span class="score-name">' + esc(s.name) + '</span>';
-      const avatarHtml = (s.has_photo && laptopIp)
-        ? '<img class="score-avatar" src="http://' + laptopIp + ':6969/api/photos/' + s.id + '">'
+      const avatarHtml = s.has_photo
+        ? '<img class="score-avatar" src="/api/photos/' + s.id + '">'
         : '';
       return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
         + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
@@ -1067,8 +1051,8 @@ function renderScores(scores) {
       const nameHtml = unclaimed
         ? '<span class="score-name anonymous">???</span>'
         : '<span class="score-name">' + esc(s.name) + '</span>';
-      const avatarHtml = (s.has_photo && laptopIp)
-        ? '<img class="score-avatar" src="http://' + laptopIp + ':6969/api/photos/' + s.id + '">'
+      const avatarHtml = s.has_photo
+        ? '<img class="score-avatar" src="/api/photos/' + s.id + '">'
         : '';
       return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
         + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
@@ -1237,7 +1221,7 @@ function openClaim(id, score) {
   document.getElementById('claim-photo-input').value = '';
 
   const photoRow = document.getElementById('claim-photo-row');
-  photoRow.classList.toggle('visible', !!laptopIp);
+  photoRow.classList.add('visible');
 
   document.getElementById('claim-overlay').classList.add('active');
   document.getElementById('claim-name').focus();
@@ -1271,7 +1255,7 @@ async function saveClaim() {
   btn.textContent = '...';
 
   try {
-    const res = await fetch('/api/claim', {
+    const res = await fetch('/api/scores/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: claimingId, name: name })
@@ -1283,11 +1267,11 @@ async function saveClaim() {
       return;
     }
 
-    if (claimPhotoFile && laptopIp) {
+    if (claimPhotoFile) {
       const formData = new FormData();
       formData.append('photo', claimPhotoFile);
       try {
-        await fetch('http://' + laptopIp + ':6969/api/photos/' + claimingId, {
+        await fetch('/api/photos/' + claimingId, {
           method: 'POST',
           body: formData
         });
@@ -1310,24 +1294,17 @@ async function saveClaim() {
 
 async function fetchScores() {
   try {
-    const res = await fetch('/api/scores');
-    const data = await res.json();
-    allScores = data.scores || [];
-    laptopIp = data.laptop_ip || null;
-    // Update backend status in settings
-    const dot = document.getElementById('backend-dot');
-    const txt = document.getElementById('backend-text');
-    if (laptopIp) {
-      dot.style.background = '#2ecc40';
-      dot.style.boxShadow = '0 0 6px #2ecc40';
-      txt.style.color = 'var(--text)';
-      txt.textContent = 'Connecte (' + laptopIp + ')';
-    } else {
-      dot.style.background = 'var(--text-muted)';
-      dot.style.boxShadow = 'none';
-      txt.style.color = 'var(--text-dim)';
-      txt.textContent = 'Non connecte';
-    }
+    const res = await fetch('/api/scores/history');
+    if (!res.ok) return;
+    const rows = await res.json();
+    // Normalize backend rows to the shape used by renderScores/drawChart
+    allScores = rows.map(r => ({
+      id: r.id,
+      time: String(r.hour).padStart(2, '0') + 'h' + String(r.minute).padStart(2, '0'),
+      score: r.score,
+      name: r.name,
+      has_photo: r.has_photo,
+    }));
     renderScores(allScores);
     if (document.getElementById('stats-panel').classList.contains('active')) {
       drawChart();
@@ -1513,73 +1490,6 @@ async function pollLogs() {
   }
 }
 
-// ---- OTA Upload ----
-
-const otaZone = document.getElementById('ota-zone');
-otaZone.addEventListener('dragover', e => { e.preventDefault(); otaZone.classList.add('dragover'); });
-otaZone.addEventListener('dragleave', () => otaZone.classList.remove('dragover'));
-otaZone.addEventListener('drop', e => {
-  e.preventDefault();
-  otaZone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) startOta(e.dataTransfer.files[0]);
-});
-
-async function startOta(file) {
-  if (!file || !file.name.endsWith('.bin')) {
-    alert('Selectionner un fichier .bin');
-    return;
-  }
-
-  const zone = document.getElementById('ota-zone');
-  const progress = document.getElementById('ota-progress');
-  const fill = document.getElementById('progress-fill');
-  const status = document.getElementById('ota-status');
-
-  zone.classList.add('uploading');
-  progress.classList.add('active');
-  status.className = 'ota-status';
-  status.textContent = 'Upload en cours... 0%';
-  fill.style.width = '0%';
-
-  try {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/ota', true);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100);
-        fill.style.width = pct + '%';
-        status.textContent = 'Upload en cours... ' + pct + '%';
-      }
-    };
-
-    xhr.onload = () => {
-      if (xhr.status === 200) {
-        fill.style.width = '100%';
-        status.className = 'ota-status success';
-        status.textContent = 'Mise a jour reussie ! Redemarrage...';
-        setTimeout(() => { location.reload(); }, 5000);
-      } else {
-        status.className = 'ota-status error';
-        status.textContent = 'Erreur: ' + (xhr.responseText || xhr.status);
-        zone.classList.remove('uploading');
-      }
-    };
-
-    xhr.onerror = () => {
-      status.className = 'ota-status error';
-      status.textContent = 'Erreur de connexion';
-      zone.classList.remove('uploading');
-    };
-
-    xhr.send(file);
-  } catch (e) {
-    status.className = 'ota-status error';
-    status.textContent = 'Erreur: ' + e.message;
-    zone.classList.remove('uploading');
-  }
-}
 </script>
 
 </body>
