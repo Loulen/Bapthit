@@ -702,6 +702,92 @@ canvas {
   border: 1px solid var(--border);
 }
 
+.score-entry.has-photo { cursor: pointer; }
+.score-entry.has-photo:hover { border-color: var(--red-dim); }
+
+/* ---- PHOTO LIGHTBOX ---- */
+
+.photo-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.92);
+  z-index: 70;
+  animation: fadeIn 0.18s ease;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.photo-overlay.active { display: flex; }
+
+.photo-frame {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.8rem;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.photo-frame img {
+  max-width: 100%;
+  max-height: calc(100vh - 8rem);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  box-shadow: 0 0 40px rgba(232,26,26,0.18);
+  object-fit: contain;
+}
+
+.photo-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  color: var(--text);
+  font-family: Impact, 'Arial Black', sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.photo-meta-name {
+  font-size: 1.4rem;
+}
+
+.photo-meta-score {
+  font-size: 1.6rem;
+  color: var(--red);
+  text-shadow: 0 0 10px rgba(232,26,26,0.4);
+}
+
+.photo-meta-time {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+}
+
+.photo-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.photo-close:hover {
+  border-color: var(--red-dim);
+  color: var(--red);
+}
+
 /* ---- CONFIG FORM ---- */
 
 .config-form {
@@ -989,6 +1075,18 @@ canvas {
   </div>
 </div>
 
+<div class="photo-overlay" id="photo-overlay" onclick="if(event.target===this)closePhoto()">
+  <button class="photo-close" onclick="closePhoto()" aria-label="Fermer">&times;</button>
+  <div class="photo-frame">
+    <img id="photo-img" alt="">
+    <div class="photo-meta">
+      <span class="photo-meta-name" id="photo-name"></span>
+      <span class="photo-meta-score" id="photo-score"></span>
+      <span class="photo-meta-time" id="photo-time"></span>
+    </div>
+  </div>
+</div>
+
 <div class="live-badge">
   <span class="live-dot"></span>LIVE
 </div>
@@ -1028,8 +1126,11 @@ function renderScores(scores) {
       const avatarHtml = s.has_photo
         ? '<img class="score-avatar" src="/api/photos/' + s.id + '">'
         : '';
-      return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
-        + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
+      const cls = unclaimed ? ' unclaimed' : (s.has_photo ? ' has-photo' : '');
+      const onClick = unclaimed
+        ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"'
+        : (s.has_photo ? ' onclick="openPhoto(' + s.id + ')"' : '');
+      return '<div class="score-entry' + cls + '"' + onClick + '>'
         + avatarHtml
         + nameHtml
         + '<span class="score-time">' + s.time + '</span>'
@@ -1054,8 +1155,11 @@ function renderScores(scores) {
       const avatarHtml = s.has_photo
         ? '<img class="score-avatar" src="/api/photos/' + s.id + '">'
         : '';
-      return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
-        + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
+      const cls = unclaimed ? ' unclaimed' : (s.has_photo ? ' has-photo' : '');
+      const onClick = unclaimed
+        ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"'
+        : (s.has_photo ? ' onclick="openPhoto(' + s.id + ')"' : '');
+      return '<div class="score-entry' + cls + '"' + onClick + '>'
         + '<span class="score-rank ' + rankClass[i] + '">#' + (i + 1) + '</span>'
         + avatarHtml
         + nameHtml
@@ -1208,6 +1312,29 @@ function drawChart() {
     ctx.stroke();
   });
 }
+
+// ---- Photo Lightbox ----
+
+function openPhoto(id) {
+  const s = allScores.find(x => x.id === id);
+  if (!s || !s.has_photo) return;
+  document.getElementById('photo-img').src = '/api/photos/' + id;
+  document.getElementById('photo-name').textContent = s.name || '';
+  document.getElementById('photo-score').textContent = s.score + ' pts';
+  document.getElementById('photo-time').textContent = s.time;
+  document.getElementById('photo-overlay').classList.add('active');
+}
+
+function closePhoto() {
+  document.getElementById('photo-overlay').classList.remove('active');
+  document.getElementById('photo-img').src = '';
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('photo-overlay').classList.contains('active')) {
+    closePhoto();
+  }
+});
 
 // ---- Claim Modal ----
 
