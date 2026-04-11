@@ -1,5 +1,6 @@
 import sqlite3
 import httpx
+from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -36,14 +37,20 @@ def init_db():
 
 
 async def register_with_esp32(my_ip: str):
-    """Register this backend with the ESP32."""
+    """Register this backend with the ESP32 and sync its wall clock."""
+    now = datetime.now()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
                 f"http://{ESP32_IP}/api/backend",
-                json={"ip": my_ip},
+                json={
+                    "ip": my_ip,
+                    "hour": now.hour,
+                    "minute": now.minute,
+                    "second": now.second,
+                },
             )
-            print(f"Registered with ESP32 as {my_ip}")
+            print(f"Registered with ESP32 as {my_ip} at {now:%H:%M:%S}")
     except Exception as e:
         print(f"Failed to register with ESP32: {e}")
         print("Will retry when ESP32 is available.")

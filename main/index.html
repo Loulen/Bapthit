@@ -601,6 +601,11 @@ canvas {
 .claim-photo-row.visible { display: flex; }
 
 .claim-photo-btn {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0.5rem 1rem;
   background: var(--surface-alt);
   border: 1px solid var(--border);
@@ -612,6 +617,14 @@ canvas {
 }
 
 .claim-photo-btn:hover { border-color: var(--red-dim); color: var(--text); }
+
+.claim-photo-btn input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 0;
+}
 
 .claim-photo-preview {
   width: 40px;
@@ -688,6 +701,61 @@ canvas {
   margin-left: 0.5rem;
   border: 1px solid var(--border);
 }
+
+/* ---- CONFIG FORM ---- */
+
+.config-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem 0.8rem;
+  align-items: center;
+  margin-top: 0.8rem;
+}
+.config-form label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+.config-form input[type="number"] {
+  width: 110px;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  text-align: right;
+}
+.config-form input[type="number"]:focus {
+  border-color: var(--red-dim);
+  outline: none;
+}
+.config-save-btn {
+  grid-column: 1 / -1;
+  margin-top: 0.6rem;
+  padding: 0.7rem;
+  background: var(--red);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.config-save-btn:hover { background: var(--red-glow); }
+.config-save-btn:disabled { opacity: 0.5; cursor: default; }
+.config-status {
+  grid-column: 1 / -1;
+  font-size: 0.7rem;
+  text-align: center;
+  min-height: 1em;
+  color: var(--text-dim);
+}
+.config-status.success { color: #2ecc40; }
+.config-status.error { color: var(--red); }
 </style>
 </head>
 <body>
@@ -760,6 +828,33 @@ canvas {
       <span id="backend-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex-shrink:0;"></span>
       <span id="backend-text" style="font-size:0.85rem;color:var(--text-dim);">Non connecte</span>
     </div>
+    <div class="section-label" style="margin-top:1.5rem">Config PunchMeter</div>
+    <div class="config-form" id="config-form">
+      <label for="cfg-maxScore">Max score (&micro;s)</label>
+      <input type="number" id="cfg-maxScore" min="1">
+      <label for="cfg-minScore">Min score (&micro;s)</label>
+      <input type="number" id="cfg-minScore" min="1">
+      <label for="cfg-defaultRollDelay">Roll delay (ms)</label>
+      <input type="number" id="cfg-defaultRollDelay" min="0">
+      <label for="cfg-rollDelayMod">Roll delay mod</label>
+      <input type="number" id="cfg-rollDelayMod" min="0">
+      <label for="cfg-rollThresh">Roll thresh</label>
+      <input type="number" id="cfg-rollThresh" min="0">
+      <label for="cfg-slowRollThresh">Slow roll thresh</label>
+      <input type="number" id="cfg-slowRollThresh" min="0">
+      <label for="cfg-slowRollDelayMod">Slow roll mod</label>
+      <input type="number" id="cfg-slowRollDelayMod" min="0">
+      <label for="cfg-defaultIncrement">Default increment</label>
+      <input type="number" id="cfg-defaultIncrement" min="0">
+      <label for="cfg-blinkDelay">Blink delay (ms)</label>
+      <input type="number" id="cfg-blinkDelay" min="0">
+      <label for="cfg-waveDuration">Wave duration</label>
+      <input type="number" id="cfg-waveDuration" min="0">
+      <label for="cfg-waveDelay">Wave delay (ms)</label>
+      <input type="number" id="cfg-waveDelay" min="0">
+      <button class="config-save-btn" id="config-save-btn" onclick="saveConfig()">Enregistrer</button>
+      <div class="config-status" id="config-status"></div>
+    </div>
   </div>
 </div>
 
@@ -769,8 +864,10 @@ canvas {
     <div class="claim-score-display" id="claim-score-display">-</div>
     <input class="claim-input" id="claim-name" type="text" placeholder="Ton nom..." maxlength="31" autocomplete="off">
     <div class="claim-photo-row" id="claim-photo-row">
-      <button class="claim-photo-btn" onclick="document.getElementById('claim-photo-input').click()">Photo</button>
-      <input type="file" id="claim-photo-input" accept="image/*" capture="environment" style="display:none" onchange="previewClaimPhoto(this)">
+      <label class="claim-photo-btn">
+        <span>Selfie</span>
+        <input type="file" id="claim-photo-input" accept="image/*" capture="user" onchange="previewClaimPhoto(this)">
+      </label>
       <img class="claim-photo-preview" id="claim-photo-preview">
     </div>
     <div class="claim-actions">
@@ -1127,8 +1224,70 @@ window.addEventListener('resize', () => {
 function toggleSettings() {
   const overlay = document.getElementById('settings-overlay');
   const gear = document.getElementById('gear-btn');
+  const wasActive = overlay.classList.contains('active');
   overlay.classList.toggle('active');
   gear.classList.toggle('active');
+  if (!wasActive) loadConfig();
+}
+
+// ---- Config form ----
+
+const CONFIG_FIELDS = [
+  'maxScore','minScore','defaultRollDelay','rollDelayMod','rollThresh',
+  'slowRollThresh','slowRollDelayMod','defaultIncrement','blinkDelay',
+  'waveDuration','waveDelay'
+];
+
+async function loadConfig() {
+  const status = document.getElementById('config-status');
+  status.className = 'config-status';
+  status.textContent = '';
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const cfg = await res.json();
+    for (const k of CONFIG_FIELDS) {
+      const el = document.getElementById('cfg-' + k);
+      if (el && cfg[k] !== undefined) el.value = cfg[k];
+    }
+  } catch (e) {
+    status.className = 'config-status error';
+    status.textContent = 'Impossible de charger la config';
+  }
+}
+
+async function saveConfig() {
+  const btn = document.getElementById('config-save-btn');
+  const status = document.getElementById('config-status');
+  const payload = {};
+  for (const k of CONFIG_FIELDS) {
+    const el = document.getElementById('cfg-' + k);
+    const v = parseInt(el.value, 10);
+    if (!Number.isFinite(v)) {
+      status.className = 'config-status error';
+      status.textContent = 'Valeur invalide: ' + k;
+      return;
+    }
+    payload[k] = v;
+  }
+  btn.disabled = true;
+  status.className = 'config-status';
+  status.textContent = '...';
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    status.className = 'config-status success';
+    status.textContent = 'Enregistre';
+  } catch (e) {
+    status.className = 'config-status error';
+    status.textContent = 'Erreur: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---- OTA Upload ----
