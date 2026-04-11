@@ -1144,6 +1144,9 @@ canvas {
 let allScores = [];
 let claimingId = null;
 let claimPhotoFile = null;
+// Hit targets for the stats chart, in CSS pixel space relative to the canvas.
+// Refreshed on every drawChart() call.
+let chartHits = [];
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach((t, i) => {
@@ -1351,16 +1354,62 @@ function drawChart() {
     ctx.restore();
   }
 
+  chartHits = [];
   pts.forEach((p, i) => {
+    const s = scores[i];
+    const radius = s.has_photo ? 6 : 4;
     ctx.beginPath();
-    ctx.arc(p.px, p.py, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#e8e8e8';
+    ctx.arc(p.px, p.py, radius, 0, Math.PI * 2);
+    ctx.fillStyle = s.has_photo ? '#e81a1a' : '#e8e8e8';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(232, 26, 26, 0.6)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = s.has_photo ? '#fff' : 'rgba(232, 26, 26, 0.6)';
+    ctx.lineWidth = s.has_photo ? 2 : 1.5;
     ctx.stroke();
+    chartHits.push({ px: p.px, py: p.py, score: s });
   });
 }
+
+// ---- Chart click → score routing ----
+
+(function setupChartClicks() {
+  const canvas = document.getElementById('chart');
+  if (!canvas) return;
+  const HIT_RADIUS = 14;  // generous for touch
+
+  function locate(evt) {
+    const rect = canvas.getBoundingClientRect();
+    const cx = evt.clientX - rect.left;
+    const cy = evt.clientY - rect.top;
+    let best = null;
+    let bestDist = HIT_RADIUS * HIT_RADIUS;
+    for (const h of chartHits) {
+      const dx = h.px - cx;
+      const dy = h.py - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestDist) {
+        bestDist = d2;
+        best = h;
+      }
+    }
+    return best;
+  }
+
+  canvas.addEventListener('click', evt => {
+    const hit = locate(evt);
+    if (!hit) return;
+    const s = hit.score;
+    if (s.has_photo) {
+      openPhoto(s.id);
+    } else if (!s.name) {
+      openClaim(s.id, s.score);
+    }
+  });
+
+  canvas.addEventListener('mousemove', evt => {
+    const hit = locate(evt);
+    canvas.style.cursor = (hit && (hit.score.has_photo || !hit.score.name)) ? 'pointer' : 'default';
+  });
+})();
 
 // ---- Photo Lightbox ----
 
