@@ -12,6 +12,23 @@ PHOTOS_DIR = Path(__file__).parent / "photos"
 DB_PATH = Path(__file__).parent / "bapthit.db"
 
 
+# Default PunchMeter config — must mirror the struct in main/main.cpp
+DEFAULT_CONFIG = {
+    "maxScore":         20000,
+    "minScore":         100000,
+    "defaultRollDelay": 15,
+    "rollDelayMod":     1,
+    "rollThresh":       60,
+    "slowRollThresh":   7,
+    "slowRollDelayMod": 100,
+    "defaultIncrement": 15,
+    "blinkDelay":       600,
+    "waveDuration":     1500,
+    "waveDelay":        200,
+}
+CONFIG_KEYS = list(DEFAULT_CONFIG.keys())
+
+
 def get_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -30,8 +47,50 @@ def init_db():
             has_photo INTEGER NOT NULL DEFAULT 0
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )
+    """)
+    count = conn.execute("SELECT COUNT(*) FROM config").fetchone()[0]
+    if count == 0:
+        conn.executemany(
+            "INSERT INTO config (key, value) VALUES (?, ?)",
+            [(k, v) for k, v in DEFAULT_CONFIG.items()],
+        )
     conn.commit()
     conn.close()
+
+
+def load_config() -> dict:
+    """Load the full config from DB. Falls back to DEFAULT_CONFIG on corruption."""
+    try:
+        conn = get_db()
+        rows = conn.execute("SELECT key, value FROM config").fetchall()
+        conn.close()
+        cfg = {r["key"]: r["value"] for r in rows}
+        for k, v in DEFAULT_CONFIG.items():
+            cfg.setdefault(k, v)
+        return cfg
+    except Exception as e:
+        print(f"Config load failed, using defaults: {e}")
+        return dict(DEFAULT_CONFIG)
+
+
+def save_config(updates: dict) -> dict:
+    """Update the given keys in DB. Returns the full merged config."""
+    conn = get_db()
+    for k, v in updates.items():
+        if k in DEFAULT_CONFIG:
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (k, int(v)),
+            )
+    conn.commit()
+    conn.close()
+    return load_config()
 
 
 @asynccontextmanager
