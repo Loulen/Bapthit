@@ -20,7 +20,8 @@ static void evt_handler(void *arg, esp_event_base_t base,
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "Disconnected, retrying");
+        wifi_event_sta_disconnected_t *e = (wifi_event_sta_disconnected_t *)data;
+        ESP_LOGW(TAG, "Disconnected (reason=%d), retrying", e ? e->reason : -1);
         xEventGroupClearBits(s_evt, WIFI_CONNECTED_BIT);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -47,7 +48,10 @@ esp_err_t wifi_sta_start_and_wait(void)
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, CONFIG_BAPTHIT_WIFI_SSID, sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, CONFIG_BAPTHIT_WIFI_PASS, sizeof(wc.sta.password) - 1);
-    wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    // Allow WPA/WPA2/WPA3 — some home routers still run WPA1, and ESP-IDF
+    // auto-promotes OPEN to WPA2 whenever a password is provided, which
+    // breaks WPA1-only APs (disconnect reason 211).
+    wc.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
