@@ -53,12 +53,35 @@ static shared_cfg_t s_cfg = {
 static int s_next_score_id = 1;
 
 // ---------------------------------------------------------------------------
-// Punchmeter log sink — forward to ESP_LOG only (WS log streaming optional)
+// Punchmeter log sink — forward to ESP_LOG and stream to backend over WS
 // ---------------------------------------------------------------------------
+
+// JSON-escape a single message into the destination buffer. We strip the
+// few characters that would break JSON (quotes, backslashes, controls)
+// rather than escaping them — the PunchMeter log format is plain ASCII.
+static int sanitize_log_msg(char *dst, size_t dst_len, const char *src)
+{
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
+        char c = src[i];
+        if (c != '"' && c != '\\' && c >= 0x20) {
+            dst[j++] = c;
+        }
+    }
+    dst[j] = '\0';
+    return (int)j;
+}
 
 static void pm_log_sink(const char *msg)
 {
     ESP_LOGI("PM", "%s", msg);
+    if (!ws_client_is_connected()) return;
+    char clean[160];
+    sanitize_log_msg(clean, sizeof(clean), msg);
+    char frame[224];
+    int n = snprintf(frame, sizeof(frame),
+        "{\"type\":\"log\",\"level\":\"I\",\"msg\":\"%s\"}", clean);
+    if (n > 0) ws_client_send_text(frame, (size_t)n);
 }
 
 // ---------------------------------------------------------------------------
