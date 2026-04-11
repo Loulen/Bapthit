@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -29,6 +30,11 @@ DEFAULT_CONFIG = {
     "waveDelay":        200,
 }
 CONFIG_KEYS = list(DEFAULT_CONFIG.keys())
+
+# In-memory log buffer fed from the device over WS
+LOG_BUFFER_MAX = 500
+log_buffer: deque = deque(maxlen=LOG_BUFFER_MAX)
+log_seq = 0
 
 
 def get_db():
@@ -78,6 +84,17 @@ def load_config() -> dict:
     except Exception as e:
         print(f"Config load failed, using defaults: {e}")
         return dict(DEFAULT_CONFIG)
+
+
+def insert_score(id_: int, score: int, ts_epoch: int) -> None:
+    dt = datetime.fromtimestamp(ts_epoch) if ts_epoch > 0 else datetime.now()
+    conn = get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO scores (id, hour, minute, score) VALUES (?, ?, ?, ?)",
+        (id_, dt.hour, dt.minute, score),
+    )
+    conn.commit()
+    conn.close()
 
 
 def save_config(updates: dict) -> dict:
@@ -188,8 +205,31 @@ async def device_ws(ws: WebSocket):
                 print(f"Device: bad JSON: {raw[:80]}")
                 continue
             mtype = msg.get("type")
-            print(f"Device msg: {mtype}")
-            # Full routing added in Task 6
+            if mtype == "hello":
+                fw = msg.get("fw", "?")
+                print(f"Device hello: fw={fw}")
+                await device_manager.send_json({"type": "config", **load_config()})
+            elif mtype == "score":
+                try:
+                    sid = int(msg["id"])
+                    sval = int(msg["score"])
+                    sts = int(msg.get("ts", 0))
+                except (KeyError, ValueError, TypeError):
+                    print(f"Device: bad score msg: {msg}")
+                    continue
+                insert_score(sid, sval, sts)
+                print(f"Device score: id={sid} val={sval}")
+            elif mtype == "log":
+                global log_seq
+                log_seq += 1
+                log_buffer.append({
+                    "s": log_seq,
+                    "t": int(datetime.now().timestamp() * 1000),
+                    "level": msg.get("level", "I"),
+                    "m": str(msg.get("msg", ""))[:200],
+                })
+            else:
+                print(f"Device: unknown msg type: {mtype}")
     except WebSocketDisconnect:
         print("Device disconnected")
     finally:
