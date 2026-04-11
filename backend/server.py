@@ -259,6 +259,11 @@ async def update_config(payload: dict):
     return cfg
 
 
+@app.get("/api/logs")
+def get_logs(since: int = 0):
+    return {"logs": [e for e in log_buffer if e["s"] > since]}
+
+
 @app.get("/api/scores/history")
 def get_history():
     conn = get_db()
