@@ -254,7 +254,8 @@ async def update_config(payload: dict):
     if not filtered:
         raise HTTPException(status_code=400, detail="No valid keys")
     cfg = save_config(filtered)
-    # DeviceManager push is wired in Task 7
+    if device_manager.is_connected():
+        await device_manager.send_json({"type": "config", **cfg})
     return cfg
 
 
