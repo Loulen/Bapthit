@@ -1,9 +1,11 @@
+import asyncio
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -117,6 +119,47 @@ class ClaimIn(BaseModel):
     name: str
 
 
+# --- Device WebSocket manager ---
+
+class DeviceManager:
+    """Singleton-ish holder for the single connected ESP device."""
+
+    def __init__(self):
+        self._ws: WebSocket | None = None
+        self._lock = asyncio.Lock()
+
+    async def attach(self, ws: WebSocket):
+        async with self._lock:
+            if self._ws is not None:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+            self._ws = ws
+
+    async def detach(self, ws: WebSocket):
+        async with self._lock:
+            if self._ws is ws:
+                self._ws = None
+
+    def is_connected(self) -> bool:
+        return self._ws is not None
+
+    async def send_json(self, msg: dict) -> bool:
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_text(json.dumps(msg))
+            return True
+        except Exception as e:
+            print(f"DeviceManager send failed: {e}")
+            return False
+
+
+device_manager = DeviceManager()
+
+
 # --- Endpoints ---
 
 @app.post("/api/scores/claim")
@@ -129,6 +172,28 @@ def receive_claim(data: ClaimIn):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.websocket("/ws/device")
+async def device_ws(ws: WebSocket):
+    await ws.accept()
+    await device_manager.attach(ws)
+    print("Device connected")
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                print(f"Device: bad JSON: {raw[:80]}")
+                continue
+            mtype = msg.get("type")
+            print(f"Device msg: {mtype}")
+            # Full routing added in Task 6
+    except WebSocketDisconnect:
+        print("Device disconnected")
+    finally:
+        await device_manager.detach(ws)
 
 
 @app.get("/api/config")
