@@ -9,10 +9,19 @@
 #ifndef PUNCHMETER_API_H
 #define PUNCHMETER_API_H
 
-// Mirrors PunchmeterConfig from punchmeter.h
+// Mirrors PunchmeterConfig from punchmeter.h — must stay in sync
 struct PunchmeterConfig {
-    unsigned long maxScore;  // microseconds, scores faster than this get 999 (default 20000)
-    unsigned long minScore;  // microseconds, scores slower than this get 0 (default 500000)
+    unsigned long maxScore;
+    unsigned long minScore;
+    int defaultRollDelay;
+    int rollDelayMod;
+    int rollThresh;
+    int slowRollThresh;
+    int slowRollDelayMod;
+    int defaultIncrement;
+    int blinkDelay;
+    int waveDuration;
+    int waveDelay;
 };
 
 void punchmeter_setup();

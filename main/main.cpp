@@ -43,9 +43,30 @@ static QueueHandle_t score_queue = NULL;
 typedef struct {
     unsigned long maxScore;
     unsigned long minScore;
+    int defaultRollDelay;
+    int rollDelayMod;
+    int rollThresh;
+    int slowRollThresh;
+    int slowRollDelayMod;
+    int defaultIncrement;
+    int blinkDelay;
+    int waveDuration;
+    int waveDelay;
 } shared_config_t;
 
-static shared_config_t shared_config = { .maxScore = 20000, .minScore = 500000 };
+static shared_config_t shared_config = {
+    .maxScore         = 20000,
+    .minScore         = 100000,
+    .defaultRollDelay = 15,
+    .rollDelayMod     = 1,
+    .rollThresh       = 60,
+    .slowRollThresh   = 7,
+    .slowRollDelayMod = 100,
+    .defaultIncrement = 15,
+    .blinkDelay       = 600,
+    .waveDuration     = 1,
+    .waveDelay        = 200,
+};
 static SemaphoreHandle_t config_mutex = NULL;
 
 // ---------------------------------------------------------------------------
@@ -70,6 +91,33 @@ static int next_score_id = 1;
 
 // Laptop backend (empty = not registered)
 static char laptop_ip[16] = "";
+
+// ---------------------------------------------------------------------------
+// Wall-clock sync — one-shot from backend register
+// ---------------------------------------------------------------------------
+
+static int     sync_hour = 0, sync_minute = 0, sync_second = 0;
+static int64_t sync_boot_ms = 0;
+static bool    time_synced = false;
+
+static void compute_wall_clock(int *out_hour, int *out_minute)
+{
+    if (!time_synced) {
+        int64_t ms = esp_timer_get_time() / 1000;
+        int64_t total_min = ms / 60000;
+        *out_hour   = (int)(total_min / 60) % 24;
+        *out_minute = (int)(total_min % 60);
+        return;
+    }
+    int64_t now_ms  = esp_timer_get_time() / 1000;
+    int64_t delta_s = (now_ms - sync_boot_ms) / 1000;
+    int64_t total_s = (int64_t)sync_hour * 3600
+                    + (int64_t)sync_minute * 60
+                    + sync_second + delta_s;
+    int64_t day_s   = ((total_s % 86400) + 86400) % 86400;
+    *out_hour   = (int)(day_s / 3600);
+    *out_minute = (int)((day_s / 60) % 60);
+}
 
 // Forwarding queue to laptop backend
 #define FWD_QUEUE_SIZE 16
@@ -127,8 +175,17 @@ static void punchmeter_task(void *arg)
         // Check for config updates
         if (xSemaphoreTake(config_mutex, 0) == pdTRUE) {
             PunchmeterConfig cfg;
-            cfg.maxScore = shared_config.maxScore;
-            cfg.minScore = shared_config.minScore;
+            cfg.maxScore         = shared_config.maxScore;
+            cfg.minScore         = shared_config.minScore;
+            cfg.defaultRollDelay = shared_config.defaultRollDelay;
+            cfg.rollDelayMod     = shared_config.rollDelayMod;
+            cfg.rollThresh       = shared_config.rollThresh;
+            cfg.slowRollThresh   = shared_config.slowRollThresh;
+            cfg.slowRollDelayMod = shared_config.slowRollDelayMod;
+            cfg.defaultIncrement = shared_config.defaultIncrement;
+            cfg.blinkDelay       = shared_config.blinkDelay;
+            cfg.waveDuration     = shared_config.waveDuration;
+            cfg.waveDelay        = shared_config.waveDelay;
             punchmeter_set_config(&cfg);
             xSemaphoreGive(config_mutex);
         }
@@ -158,9 +215,8 @@ static void drain_score_queue(void)
 {
     score_event_t evt;
     while (xQueueReceive(score_queue, &evt, 0) == pdTRUE) {
-        int64_t total_minutes = evt.timestamp_ms / 60000;
-        int hour = (int)(total_minutes / 60) % 24;
-        int minute = (int)(total_minutes % 60);
+        int hour, minute;
+        compute_wall_clock(&hour, &minute);
         add_score(hour, minute, evt.score);
     }
 }
@@ -407,9 +463,37 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Parse an integer following "\"key\":" in buf. Returns true if found.
+static bool json_parse_int(const char *buf, const char *key, int *out)
+{
+    char needle[40];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *k = strstr(buf, needle);
+    if (!k) return false;
+    const char *colon = strchr(k, ':');
+    if (!colon) return false;
+    *out = atoi(colon + 1);
+    return true;
+}
+
+// Parse an unsigned long following "\"key\":" in buf. Rejects zero.
+static bool json_parse_ulong(const char *buf, const char *key, unsigned long *out)
+{
+    char needle[40];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *k = strstr(buf, needle);
+    if (!k) return false;
+    const char *colon = strchr(k, ':');
+    if (!colon) return false;
+    unsigned long val = strtoul(colon + 1, NULL, 10);
+    if (val == 0) return false;
+    *out = val;
+    return true;
+}
+
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    char buf[128];
+    char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
@@ -419,35 +503,51 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 
     xSemaphoreTake(config_mutex, portMAX_DELAY);
 
-    char *key = strstr(buf, "\"maxScore\"");
-    if (key) {
-        char *colon = strchr(key, ':');
-        if (colon) {
-            unsigned long val = strtoul(colon + 1, NULL, 10);
-            if (val > 0) {
-                shared_config.maxScore = val;
-                ESP_LOGI(TAG, "Config updated: maxScore=%lu", val);
-            }
-        }
-    }
+    unsigned long ul_val;
+    int int_val;
 
-    key = strstr(buf, "\"minScore\"");
-    if (key) {
-        char *colon = strchr(key, ':');
-        if (colon) {
-            unsigned long val = strtoul(colon + 1, NULL, 10);
-            if (val > 0) {
-                shared_config.minScore = val;
-                ESP_LOGI(TAG, "Config updated: minScore=%lu", val);
-            }
-        }
-    }
+    if (json_parse_ulong(buf, "maxScore",         &ul_val))  shared_config.maxScore         = ul_val;
+    if (json_parse_ulong(buf, "minScore",         &ul_val))  shared_config.minScore         = ul_val;
+    if (json_parse_int  (buf, "defaultRollDelay", &int_val)) shared_config.defaultRollDelay = int_val;
+    if (json_parse_int  (buf, "rollDelayMod",     &int_val)) shared_config.rollDelayMod     = int_val;
+    if (json_parse_int  (buf, "rollThresh",       &int_val)) shared_config.rollThresh       = int_val;
+    if (json_parse_int  (buf, "slowRollThresh",   &int_val)) shared_config.slowRollThresh   = int_val;
+    if (json_parse_int  (buf, "slowRollDelayMod", &int_val)) shared_config.slowRollDelayMod = int_val;
+    if (json_parse_int  (buf, "defaultIncrement", &int_val)) shared_config.defaultIncrement = int_val;
+    if (json_parse_int  (buf, "blinkDelay",       &int_val)) shared_config.blinkDelay       = int_val;
+    if (json_parse_int  (buf, "waveDuration",     &int_val)) shared_config.waveDuration     = int_val;
+    if (json_parse_int  (buf, "waveDelay",        &int_val)) shared_config.waveDelay        = int_val;
+
+    ESP_LOGI(TAG, "Config updated");
 
     xSemaphoreGive(config_mutex);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t config_get_handler(httpd_req_t *req)
+{
+    xSemaphoreTake(config_mutex, portMAX_DELAY);
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"maxScore\":%lu,\"minScore\":%lu,"
+        "\"defaultRollDelay\":%d,\"rollDelayMod\":%d,"
+        "\"rollThresh\":%d,\"slowRollThresh\":%d,\"slowRollDelayMod\":%d,"
+        "\"defaultIncrement\":%d,\"blinkDelay\":%d,"
+        "\"waveDuration\":%d,\"waveDelay\":%d}",
+        shared_config.maxScore, shared_config.minScore,
+        shared_config.defaultRollDelay, shared_config.rollDelayMod,
+        shared_config.rollThresh, shared_config.slowRollThresh, shared_config.slowRollDelayMod,
+        shared_config.defaultIncrement, shared_config.blinkDelay,
+        shared_config.waveDuration, shared_config.waveDelay);
+    xSemaphoreGive(config_mutex);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, len);
     return ESP_OK;
 }
 
@@ -683,6 +783,20 @@ static esp_err_t backend_register_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Backend registered at %s", laptop_ip);
 
+    // Parse optional time fields and arm wall-clock sync
+    int h = -1, m = -1, s = -1;
+    json_parse_int(buf, "hour",   &h);
+    json_parse_int(buf, "minute", &m);
+    json_parse_int(buf, "second", &s);
+    if (h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
+        sync_hour    = h;
+        sync_minute  = m;
+        sync_second  = s;
+        sync_boot_ms = esp_timer_get_time() / 1000;
+        time_synced  = true;
+        ESP_LOGI(TAG, "Wall clock synced: %02d:%02d:%02d", h, m, s);
+    }
+
     // Fetch persisted scores from laptop
     fetch_history_from_laptop();
 
@@ -772,6 +886,14 @@ static httpd_handle_t start_webserver(void)
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &config_uri);
+
+    const httpd_uri_t config_get_uri = {
+        .uri = "/api/config",
+        .method = HTTP_GET,
+        .handler = config_get_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &config_get_uri);
 
     const httpd_uri_t claim_uri = {
         .uri = "/api/claim",
