@@ -18,9 +18,5 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 
-# Wi-Fi AP
-CONFIG_ESP_WIFI_SSID="BAPTHIT"
-CONFIG_ESP_WIFI_PASSWORD=""
-CONFIG_ESP_WIFI_CHANNEL=1
-CONFIG_ESP_WIFI_MAX_STA_NUM=8
-
+# Bapthit WiFi credentials live in sdkconfig.defaults.local (gitignored)
+# and are declared in main/Kconfig.projbuild as CONFIG_BAPTHIT_WIFI_*.
