@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp" "wifi_sta.c" "score_queue.c"
+    SRCS "main.cpp" "wifi_sta.c" "score_queue.c" "ws_client.c"
     INCLUDE_DIRS "."
     REQUIRES esp_wifi esp_event nvs_flash esp_netif esp_http_server esp_http_client esp_app_format app_update lwip idf_component
 )
