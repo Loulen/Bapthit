@@ -42,6 +42,16 @@ LOG_BUFFER_MAX = 500
 log_buffer: deque = deque(maxlen=LOG_BUFFER_MAX)
 log_seq = 0
 
+# Per-boot id remapping. The ESP's score id counter resets to 1 on every
+# reboot, which would otherwise collide with rows already in the scores
+# table (INSERT OR IGNORE silently drops them). When we see a new boot id
+# in a hello frame, we snapshot MAX(scores.id) and use it as an offset:
+# the first esp_id=1 becomes db_id = max+1, the next becomes max+2, etc.
+# A reconnect with the same boot id keeps the same offset, so FIFO
+# replays after a transient network blip stay consistent.
+device_boot_id: int | None = None
+device_id_offset: int = 0
+
 
 def get_db():
     conn = sqlite3.connect(str(DB_PATH))
@@ -101,13 +111,24 @@ TS_EPOCH_FLOOR = 1577836800  # 2020-01-01 UTC
 
 def insert_score(id_: int, score: int, ts_epoch: int) -> None:
     dt = datetime.fromtimestamp(ts_epoch) if ts_epoch >= TS_EPOCH_FLOOR else datetime.now()
+    db_id = id_ + device_id_offset
     conn = get_db()
     conn.execute(
         "INSERT OR IGNORE INTO scores (id, hour, minute, score) VALUES (?, ?, ?, ?)",
-        (id_, dt.hour, dt.minute, score),
+        (db_id, dt.hour, dt.minute, score),
     )
     conn.commit()
     conn.close()
+
+
+def _refresh_id_offset() -> None:
+    """Snapshot MAX(scores.id) so the next esp_id starts above it."""
+    global device_id_offset
+    conn = get_db()
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM scores").fetchone()
+    conn.close()
+    device_id_offset = int(row[0])
+    print(f"id offset reset to {device_id_offset}")
 
 
 def save_config(updates: dict) -> dict:
@@ -293,7 +314,16 @@ async def device_ws(ws: WebSocket):
             mtype = msg.get("type")
             if mtype == "hello":
                 fw = msg.get("fw", "?")
-                print(f"Device hello: fw={fw}")
+                boot = msg.get("boot")
+                global device_boot_id
+                if boot is None:
+                    print(f"Device hello: fw={fw} (no boot id)")
+                elif boot != device_boot_id:
+                    print(f"Device hello: fw={fw} boot={boot} (new session)")
+                    device_boot_id = boot
+                    _refresh_id_offset()
+                else:
+                    print(f"Device hello: fw={fw} boot={boot} (reconnect)")
                 await device_manager.send_json({"type": "config", **load_config()})
             elif mtype == "score":
                 try:

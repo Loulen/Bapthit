@@ -7,6 +7,7 @@
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
+#include "esp_random.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -50,7 +51,8 @@ static shared_cfg_t s_cfg = {
     .mux = NULL,
 };
 
-static int s_next_score_id = 1;
+static int      s_next_score_id = 1;
+static uint32_t s_boot_id = 0;  // randomized once at boot, sent to backend
 
 // ---------------------------------------------------------------------------
 // Punchmeter log sink — forward to ESP_LOG and stream to backend over WS
@@ -174,11 +176,12 @@ static void on_ws_text(const char *data, size_t len)
 static void on_ws_connect(void)
 {
     const esp_app_desc_t *d = esp_app_get_description();
-    char msg[96];
+    char msg[128];
     int n = snprintf(msg, sizeof(msg),
-        "{\"type\":\"hello\",\"fw\":\"%s\"}", d ? d->version : "?");
+        "{\"type\":\"hello\",\"fw\":\"%s\",\"boot\":%u}",
+        d ? d->version : "?", (unsigned)s_boot_id);
     ws_client_send_text(msg, (size_t)n);
-    ESP_LOGI(TAG, "sent hello");
+    ESP_LOGI(TAG, "sent hello (boot=%u)", (unsigned)s_boot_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +287,11 @@ extern "C" void app_main(void)
     s_cfg.mux = xSemaphoreCreateMutex();
     score_queue_init();
     punchmeter_set_logger(pm_log_sink);
+
+    // Random boot session id, used by the backend to detect a fresh boot
+    // and remap our local score ids (which always start at 1) to a
+    // collision-free range in the score table.
+    s_boot_id = esp_random();
 
     // PunchMeter task on core 1 — keeps the game responsive even while
     // WiFi/WS is bringing itself up.
