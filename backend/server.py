@@ -131,6 +131,28 @@ def receive_claim(data: ClaimIn):
     return {"ok": True}
 
 
+@app.get("/api/config")
+def get_config():
+    return load_config()
+
+
+@app.post("/api/config")
+async def update_config(payload: dict):
+    # Validate: only known keys, ints only
+    filtered = {}
+    for k in CONFIG_KEYS:
+        if k in payload:
+            try:
+                filtered[k] = int(payload[k])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"Invalid value for {k}")
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No valid keys")
+    cfg = save_config(filtered)
+    # DeviceManager push is wired in Task 7
+    return cfg
+
+
 @app.get("/api/scores/history")
 def get_history():
     conn = get_db()
