@@ -1,7 +1,9 @@
 idf_component_register(
     SRCS "main.cpp" "wifi_sta.c" "score_queue.c" "ws_client.c"
     INCLUDE_DIRS "."
-    REQUIRES esp_wifi esp_event nvs_flash esp_netif esp_http_server esp_http_client esp_app_format app_update lwip idf_component
+    REQUIRES esp_wifi esp_event nvs_flash esp_netif esp_app_format app_update
+             lwip esp_timer idf_component
+    PRIV_REQUIRES mdns esp_websocket_client
 )
 
 # Dev build variant: set BAPTHIT_DEV=1 in the environment (e.g. via the
