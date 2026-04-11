@@ -22,7 +22,11 @@
 
 static const char *TAG = "bapthit";
 
+#ifdef BAPTHIT_DEV
+#define WIFI_SSID "BAPTHIT-DEV"
+#else
 #define WIFI_SSID "BAPTHIT"
+#endif
 #define WIFI_CHANNEL 1
 #define MAX_STA_CONN 8
 
@@ -64,9 +68,13 @@ static shared_config_t shared_config = {
     .slowRollDelayMod = 100,
     .defaultIncrement = 15,
     .blinkDelay       = 600,
-    .waveDuration     = 1,
+    .waveDuration     = 1500,
     .waveDelay        = 200,
 };
+// Set to true whenever shared_config changes; the punchmeter task
+// clears it after pushing the new config down to the library. True at
+// boot so the initial values are applied once.
+static volatile bool shared_config_dirty = true;
 static SemaphoreHandle_t config_mutex = NULL;
 
 // ---------------------------------------------------------------------------
@@ -208,8 +216,9 @@ static void punchmeter_task(void *arg)
     int prev_score = -1;
 
     while (1) {
-        // Check for config updates
-        if (xSemaphoreTake(config_mutex, 0) == pdTRUE) {
+        // Push config updates only when something actually changed.
+        // Otherwise we spam the library (and the serial UART) at ~100 Hz.
+        if (shared_config_dirty && xSemaphoreTake(config_mutex, 0) == pdTRUE) {
             PunchmeterConfig cfg;
             cfg.maxScore         = shared_config.maxScore;
             cfg.minScore         = shared_config.minScore;
@@ -222,8 +231,11 @@ static void punchmeter_task(void *arg)
             cfg.blinkDelay       = shared_config.blinkDelay;
             cfg.waveDuration     = shared_config.waveDuration;
             cfg.waveDelay        = shared_config.waveDelay;
-            punchmeter_set_config(&cfg);
+            shared_config_dirty = false;
             xSemaphoreGive(config_mutex);
+            // Apply outside the mutex: set_config only touches the library's
+            // private statics, and we already have a local copy.
+            punchmeter_set_config(&cfg);
         }
 
         punchmeter_loop();
@@ -554,6 +566,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     if (json_parse_int  (buf, "waveDuration",     &int_val)) shared_config.waveDuration     = int_val;
     if (json_parse_int  (buf, "waveDelay",        &int_val)) shared_config.waveDelay        = int_val;
 
+    shared_config_dirty = true;
     ESP_LOGI(TAG, "Config updated");
 
     xSemaphoreGive(config_mutex);

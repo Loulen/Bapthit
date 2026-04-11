@@ -2,15 +2,23 @@ PORT ?= /dev/ttyUSB0
 BAUD ?= 115200
 IDF_ENV = . $(HOME)/.espressif/v6.0/esp-idf/export.sh 2>/dev/null
 
-.PHONY: build flash monitor flash-monitor serial-fill backend backend-install backend-stop clean
+.PHONY: build build-dev flash flash-dev monitor flash-monitor serial-fill backend backend-install backend-stop clean
 
 ## ESP32 firmware
 
 build:
 	$(IDF_ENV) && idf.py build
 
+# Dev build: SSID becomes BAPTHIT-DEV. Forces a reconfigure because
+# BAPTHIT_DEV is read at CMake time from the environment.
+build-dev:
+	$(IDF_ENV) && BAPTHIT_DEV=1 idf.py reconfigure build
+
 flash:
 	$(IDF_ENV) && idf.py -p $(PORT) flash
+
+flash-dev:
+	$(IDF_ENV) && BAPTHIT_DEV=1 idf.py reconfigure -p $(PORT) flash
 
 monitor:
 	$(IDF_ENV) && idf.py -p $(PORT) monitor
