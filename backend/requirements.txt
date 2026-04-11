@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.*
 python-multipart>=0.0.18
 websockets==13.*
 zeroconf==0.136.*
+qrcode[pil]==7.4.*

@@ -843,6 +843,43 @@ canvas {
 .config-status.success { color: #2ecc40; }
 .config-status.error { color: var(--red); }
 
+/* ---- QR CODES ---- */
+
+.qr-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+}
+
+.qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.8rem;
+  background: #fff;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.qr-card img {
+  width: 100%;
+  max-width: 160px;
+  height: auto;
+  display: block;
+  image-rendering: pixelated;
+}
+
+.qr-card span {
+  font-size: 0.7rem;
+  color: #111;
+  text-align: center;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
 /* ---- LOGS OVERLAY ---- */
 
 .logs-open-btn {
@@ -1010,7 +1047,19 @@ canvas {
       <span class="settings-title">Parametres</span>
       <button class="settings-close" onclick="toggleSettings()">&times;</button>
     </div>
-    <div class="section-label">Config PunchMeter</div>
+    <div class="section-label">Connexion</div>
+    <div class="qr-grid">
+      <div class="qr-card">
+        <img src="/api/qr/wifi" alt="QR WiFi">
+        <span>Rejoindre le WiFi</span>
+      </div>
+      <div class="qr-card">
+        <img src="/api/qr/url" alt="QR URL">
+        <span>Ouvrir BAPT'HIT</span>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-top:1.5rem">Config PunchMeter</div>
     <div class="config-form" id="config-form">
       <label for="cfg-maxScore">Max score (&micro;s)</label>
       <input type="number" id="cfg-maxScore" min="1">

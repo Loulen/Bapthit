@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import socket as _socket
 import sqlite3
@@ -7,9 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import qrcode
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from zeroconf import ServiceInfo
@@ -126,6 +128,46 @@ def save_config(updates: dict) -> dict:
 MDNS_SERVICE_TYPE = "_bapthit._tcp.local."
 MDNS_NAME = "bapthit-server"
 MDNS_PORT = 6969
+
+# Path to the gitignored ESP credentials overlay. The backend reads this
+# at startup so it can publish a join-the-WiFi QR code without ever
+# needing to know the password as a separate config knob.
+SDKCONFIG_LOCAL = Path(__file__).parent.parent / "sdkconfig.defaults.local"
+
+
+def _parse_sdkconfig_local() -> dict:
+    """Extract the BAPTHIT_WIFI_* values from sdkconfig.defaults.local."""
+    out = {"ssid": "", "password": ""}
+    if not SDKCONFIG_LOCAL.exists():
+        return out
+    try:
+        for raw in SDKCONFIG_LOCAL.read_text().splitlines():
+            line = raw.strip()
+            if line.startswith("CONFIG_BAPTHIT_WIFI_SSID="):
+                out["ssid"] = line.split("=", 1)[1].strip().strip('"')
+            elif line.startswith("CONFIG_BAPTHIT_WIFI_PASS="):
+                out["password"] = line.split("=", 1)[1].strip().strip('"')
+    except Exception as e:
+        print(f"sdkconfig parse failed: {e}")
+    return out
+
+
+def _wifi_qr_payload(ssid: str, password: str) -> str:
+    """Format per the de-facto WiFi QR standard scanned by Android/iOS."""
+    def esc(s: str) -> str:
+        # Escape backslash, semicolon, comma, colon, and quote per spec
+        for ch in ("\\", ";", ",", ":", '"'):
+            s = s.replace(ch, "\\" + ch)
+        return s
+    auth = "WPA" if password else "nopass"
+    return f"WIFI:T:{auth};S:{esc(ssid)};P:{esc(password)};H:false;;"
+
+
+def _qr_png(payload: str) -> bytes:
+    img = qrcode.make(payload, box_size=10, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _local_ip() -> str:
@@ -351,6 +393,21 @@ def get_photo(score_id: int):
     if not photo_path.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
     return FileResponse(photo_path, media_type="image/jpeg")
+
+
+@app.get("/api/qr/wifi")
+def qr_wifi():
+    creds = _parse_sdkconfig_local()
+    if not creds["ssid"]:
+        raise HTTPException(status_code=404, detail="WiFi SSID not configured")
+    payload = _wifi_qr_payload(creds["ssid"], creds["password"])
+    return Response(content=_qr_png(payload), media_type="image/png")
+
+
+@app.get("/api/qr/url")
+def qr_url():
+    payload = f"http://{MDNS_NAME}.local:{MDNS_PORT}/"
+    return Response(content=_qr_png(payload), media_type="image/png")
 
 
 STATIC_DIR = Path(__file__).parent / "static"
