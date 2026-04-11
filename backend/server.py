@@ -126,7 +126,7 @@ def save_config(updates: dict) -> dict:
 
 
 MDNS_SERVICE_TYPE = "_bapthit._tcp.local."
-MDNS_NAME = "bapthit-server"
+MDNS_NAME = "bapthit"
 MDNS_PORT = 6969
 
 # Path to the gitignored ESP credentials overlay. The backend reads this

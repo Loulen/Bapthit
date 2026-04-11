@@ -13,7 +13,7 @@ typedef void (*ws_on_text_fn)(const char *data, size_t len);
 typedef void (*ws_on_connect_fn)(void);
 
 typedef struct {
-    const char       *host;       /* e.g. "bapthit-server.local" */
+    const char       *host;       /* e.g. "bapthit.local" */
     int               port;       /* e.g. 6969 */
     const char       *path;       /* e.g. "/ws/device" */
     ws_on_connect_fn  on_connect;
