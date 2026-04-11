@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from zeroconf import ServiceInfo
 from zeroconf.asyncio import AsyncZeroconf
@@ -343,6 +344,20 @@ def get_photo(score_id: int):
     if not photo_path.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
     return FileResponse(photo_path, media_type="image/jpeg")
+
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/")
+def root():
+    index = STATIC_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=404, detail="UI not built")
+    return FileResponse(index, media_type="text/html")
+
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":
