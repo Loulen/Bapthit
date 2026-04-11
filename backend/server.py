@@ -90,8 +90,15 @@ def load_config() -> dict:
         return dict(DEFAULT_CONFIG)
 
 
+# Anything before this looks like ESP uptime rather than a real epoch.
+# Without SNTP, ESP-IDF returns "seconds since boot" from time(NULL) instead
+# of seconds since 1970, so a 1h-uptime device sends ts=3600 which would be
+# stored as "01h00". Detect that and fall back to the backend wall clock.
+TS_EPOCH_FLOOR = 1577836800  # 2020-01-01 UTC
+
+
 def insert_score(id_: int, score: int, ts_epoch: int) -> None:
-    dt = datetime.fromtimestamp(ts_epoch) if ts_epoch > 0 else datetime.now()
+    dt = datetime.fromtimestamp(ts_epoch) if ts_epoch >= TS_EPOCH_FLOOR else datetime.now()
     conn = get_db()
     conn.execute(
         "INSERT OR IGNORE INTO scores (id, hour, minute, score) VALUES (?, ?, ?, ?)",
