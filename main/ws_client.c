@@ -50,6 +50,12 @@ esp_err_t ws_client_start(const ws_client_cfg_t *cfg)
     wc.uri = uri;
     wc.reconnect_timeout_ms = 5000;
     wc.network_timeout_ms = 10000;
+    // WS-level ping/pong every 10s so that a backend that vanishes
+    // (laptop sleep, uvicorn crash) is detected within ~20s instead of
+    // leaving us stuck on a zombie TCP socket forever.
+    wc.ping_interval_sec = 10;
+    wc.pingpong_timeout_sec = 10;
+    wc.disable_pingpong_discon = false;
 
     s_client = esp_websocket_client_init(&wc);
     if (!s_client) return ESP_FAIL;
