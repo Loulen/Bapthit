@@ -7,3 +7,4 @@ backend/.venv/
 backend/photos/
 backend/bapthit.db
 backend/__pycache__/
+backend/report.html
