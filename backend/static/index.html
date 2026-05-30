@@ -131,6 +131,62 @@ body {
   background: var(--surface-alt);
 }
 
+/* ---- FILTER TOGGLE ---- */
+
+.filter-bar {
+  display: flex;
+  justify-content: center;
+  padding: 0.6rem 1rem 0;
+}
+
+.filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.filter-toggle input { display: none; }
+
+.filter-toggle .toggle-track {
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--border);
+  position: relative;
+  transition: background 0.2s;
+}
+
+.filter-toggle input:checked + .toggle-track {
+  background: var(--red-dim);
+}
+
+.filter-toggle .toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.2s, background 0.2s;
+}
+
+.filter-toggle input:checked + .toggle-track::after {
+  transform: translateX(16px);
+  background: var(--red);
+}
+
+.filter-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
 /* ---- PANELS ---- */
 
 .panel {
@@ -1005,6 +1061,14 @@ canvas {
   </div>
 </div>
 
+<div class="filter-bar">
+  <label class="filter-toggle">
+    <input type="checkbox" id="filter-claimed" onchange="applyFilter()">
+    <span class="toggle-track"></span>
+    <span class="filter-label">Claimed only</span>
+  </label>
+</div>
+
 <div id="scores-panel" class="panel active">
   <div class="section">
     <div class="section-label">Derniers Scores</div>
@@ -1148,6 +1212,21 @@ let claimPhotoFile = null;
 // Refreshed on every drawChart() call.
 let chartHits = [];
 
+function getFilteredScores() {
+  if (document.getElementById('filter-claimed').checked) {
+    return allScores.filter(s => s.name);
+  }
+  return allScores;
+}
+
+function applyFilter() {
+  const scores = getFilteredScores();
+  renderScores(scores);
+  if (document.getElementById('stats-panel').classList.contains('active')) {
+    drawChart();
+  }
+}
+
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach((t, i) => {
     t.classList.toggle('active', (tab === 'scores' && i === 0) || (tab === 'stats' && i === 1));
@@ -1248,19 +1327,20 @@ function drawChart() {
 
   ctx.clearRect(0, 0, w, h);
 
-  if (allScores.length < 2) {
+  const scores = getFilteredScores();
+
+  if (scores.length < 2) {
     ctx.fillStyle = '#444';
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('Pas assez de donnees', w / 2, h / 2);
+    chartHits = [];
     return;
   }
 
   const pad = { top: 15, right: 15, bottom: 35, left: 45 };
   const cw = w - pad.left - pad.right;
   const ch = h - pad.top - pad.bottom;
-
-  const scores = allScores;
   const minScore = Math.min(...scores.map(s => s.score)) - 50;
   const maxScore = Math.max(...scores.map(s => s.score)) + 50;
 
@@ -1530,7 +1610,7 @@ async function fetchScores() {
       name: r.name,
       has_photo: r.has_photo,
     }));
-    renderScores(allScores);
+    renderScores(getFilteredScores());
     if (document.getElementById('stats-panel').classList.contains('active')) {
       drawChart();
     }
