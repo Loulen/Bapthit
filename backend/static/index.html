@@ -131,6 +131,62 @@ body {
   background: var(--surface-alt);
 }
 
+/* ---- FILTER TOGGLE ---- */
+
+.filter-bar {
+  display: flex;
+  justify-content: center;
+  padding: 0.6rem 1rem 0;
+}
+
+.filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.filter-toggle input { display: none; }
+
+.filter-toggle .toggle-track {
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--border);
+  position: relative;
+  transition: background 0.2s;
+}
+
+.filter-toggle input:checked + .toggle-track {
+  background: var(--red-dim);
+}
+
+.filter-toggle .toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.2s, background 0.2s;
+}
+
+.filter-toggle input:checked + .toggle-track::after {
+  transform: translateX(16px);
+  background: var(--red);
+}
+
+.filter-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
 /* ---- PANELS ---- */
 
 .panel {
@@ -702,6 +758,92 @@ canvas {
   border: 1px solid var(--border);
 }
 
+.score-entry.has-photo { cursor: pointer; }
+.score-entry.has-photo:hover { border-color: var(--red-dim); }
+
+/* ---- PHOTO LIGHTBOX ---- */
+
+.photo-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.92);
+  z-index: 70;
+  animation: fadeIn 0.18s ease;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.photo-overlay.active { display: flex; }
+
+.photo-frame {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.8rem;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.photo-frame img {
+  max-width: 100%;
+  max-height: calc(100vh - 8rem);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  box-shadow: 0 0 40px rgba(232,26,26,0.18);
+  object-fit: contain;
+}
+
+.photo-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  color: var(--text);
+  font-family: Impact, 'Arial Black', sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.photo-meta-name {
+  font-size: 1.4rem;
+}
+
+.photo-meta-score {
+  font-size: 1.6rem;
+  color: var(--red);
+  text-shadow: 0 0 10px rgba(232,26,26,0.4);
+}
+
+.photo-meta-time {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+}
+
+.photo-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.photo-close:hover {
+  border-color: var(--red-dim);
+  color: var(--red);
+}
+
 /* ---- CONFIG FORM ---- */
 
 .config-form {
@@ -756,6 +898,43 @@ canvas {
 }
 .config-status.success { color: #2ecc40; }
 .config-status.error { color: var(--red); }
+
+/* ---- QR CODES ---- */
+
+.qr-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+}
+
+.qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.8rem;
+  background: #fff;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.qr-card img {
+  width: 100%;
+  max-width: 160px;
+  height: auto;
+  display: block;
+  image-rendering: pixelated;
+}
+
+.qr-card span {
+  font-size: 0.7rem;
+  color: #111;
+  text-align: center;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
 
 /* ---- LOGS OVERLAY ---- */
 
@@ -882,6 +1061,14 @@ canvas {
   </div>
 </div>
 
+<div class="filter-bar">
+  <label class="filter-toggle">
+    <input type="checkbox" id="filter-claimed" onchange="applyFilter()">
+    <span class="toggle-track"></span>
+    <span class="filter-label">Claimed only</span>
+  </label>
+</div>
+
 <div id="scores-panel" class="panel active">
   <div class="section">
     <div class="section-label">Derniers Scores</div>
@@ -924,21 +1111,18 @@ canvas {
       <span class="settings-title">Parametres</span>
       <button class="settings-close" onclick="toggleSettings()">&times;</button>
     </div>
-    <div class="section-label">Mise a jour firmware</div>
-    <div class="ota-zone" id="ota-zone" onclick="document.getElementById('ota-input').click()">
-      <div class="ota-icon">&#8682;</div>
-      <div class="ota-text">Glisser un fichier <strong>.bin</strong> ici<br>ou appuyer pour selectionner</div>
-      <input type="file" id="ota-input" class="ota-input" accept=".bin" onchange="startOta(this.files[0])">
+    <div class="section-label">Connexion</div>
+    <div class="qr-grid">
+      <div class="qr-card">
+        <img src="/api/qr/wifi" alt="QR WiFi">
+        <span>Rejoindre le WiFi</span>
+      </div>
+      <div class="qr-card">
+        <img src="/api/qr/url" alt="QR URL">
+        <span>Ouvrir BAPT'HIT</span>
+      </div>
     </div>
-    <div class="ota-progress" id="ota-progress">
-      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-      <div class="ota-status" id="ota-status">Upload en cours...</div>
-    </div>
-    <div class="section-label" style="margin-top:1.5rem">Backend</div>
-    <div id="backend-status" style="display:flex;align-items:center;gap:0.6rem;padding:0.8rem 1rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
-      <span id="backend-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex-shrink:0;"></span>
-      <span id="backend-text" style="font-size:0.85rem;color:var(--text-dim);">Non connecte</span>
-    </div>
+
     <div class="section-label" style="margin-top:1.5rem">Config PunchMeter</div>
     <div class="config-form" id="config-form">
       <label for="cfg-maxScore">Max score (&micro;s)</label>
@@ -1004,15 +1188,44 @@ canvas {
   </div>
 </div>
 
+<div class="photo-overlay" id="photo-overlay" onclick="if(event.target===this)closePhoto()">
+  <button class="photo-close" onclick="closePhoto()" aria-label="Fermer">&times;</button>
+  <div class="photo-frame">
+    <img id="photo-img" alt="">
+    <div class="photo-meta">
+      <span class="photo-meta-name" id="photo-name"></span>
+      <span class="photo-meta-score" id="photo-score"></span>
+      <span class="photo-meta-time" id="photo-time"></span>
+    </div>
+  </div>
+</div>
+
 <div class="live-badge">
   <span class="live-dot"></span>LIVE
 </div>
 
 <script>
 let allScores = [];
-let laptopIp = null;
 let claimingId = null;
 let claimPhotoFile = null;
+// Hit targets for the stats chart, in CSS pixel space relative to the canvas.
+// Refreshed on every drawChart() call.
+let chartHits = [];
+
+function getFilteredScores() {
+  if (document.getElementById('filter-claimed').checked) {
+    return allScores.filter(s => s.name);
+  }
+  return allScores;
+}
+
+function applyFilter() {
+  const scores = getFilteredScores();
+  renderScores(scores);
+  if (document.getElementById('stats-panel').classList.contains('active')) {
+    drawChart();
+  }
+}
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach((t, i) => {
@@ -1041,11 +1254,14 @@ function renderScores(scores) {
       const nameHtml = unclaimed
         ? '<span class="score-name anonymous">???</span>'
         : '<span class="score-name">' + esc(s.name) + '</span>';
-      const avatarHtml = (s.has_photo && laptopIp)
-        ? '<img class="score-avatar" src="http://' + laptopIp + ':6969/api/photos/' + s.id + '">'
+      const avatarHtml = s.has_photo
+        ? '<img class="score-avatar" src="/api/photos/' + s.id + '">'
         : '';
-      return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
-        + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
+      const cls = unclaimed ? ' unclaimed' : (s.has_photo ? ' has-photo' : '');
+      const onClick = unclaimed
+        ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"'
+        : (s.has_photo ? ' onclick="openPhoto(' + s.id + ')"' : '');
+      return '<div class="score-entry' + cls + '"' + onClick + '>'
         + avatarHtml
         + nameHtml
         + '<span class="score-time">' + s.time + '</span>'
@@ -1067,11 +1283,14 @@ function renderScores(scores) {
       const nameHtml = unclaimed
         ? '<span class="score-name anonymous">???</span>'
         : '<span class="score-name">' + esc(s.name) + '</span>';
-      const avatarHtml = (s.has_photo && laptopIp)
-        ? '<img class="score-avatar" src="http://' + laptopIp + ':6969/api/photos/' + s.id + '">'
+      const avatarHtml = s.has_photo
+        ? '<img class="score-avatar" src="/api/photos/' + s.id + '">'
         : '';
-      return '<div class="score-entry' + (unclaimed ? ' unclaimed' : '') + '"'
-        + (unclaimed ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"' : '') + '>'
+      const cls = unclaimed ? ' unclaimed' : (s.has_photo ? ' has-photo' : '');
+      const onClick = unclaimed
+        ? ' onclick="openClaim(' + s.id + ',' + s.score + ')"'
+        : (s.has_photo ? ' onclick="openPhoto(' + s.id + ')"' : '');
+      return '<div class="score-entry' + cls + '"' + onClick + '>'
         + '<span class="score-rank ' + rankClass[i] + '">#' + (i + 1) + '</span>'
         + avatarHtml
         + nameHtml
@@ -1108,19 +1327,20 @@ function drawChart() {
 
   ctx.clearRect(0, 0, w, h);
 
-  if (allScores.length < 2) {
+  const scores = getFilteredScores();
+
+  if (scores.length < 2) {
     ctx.fillStyle = '#444';
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('Pas assez de donnees', w / 2, h / 2);
+    chartHits = [];
     return;
   }
 
   const pad = { top: 15, right: 15, bottom: 35, left: 45 };
   const cw = w - pad.left - pad.right;
   const ch = h - pad.top - pad.bottom;
-
-  const scores = allScores;
   const minScore = Math.min(...scores.map(s => s.score)) - 50;
   const maxScore = Math.max(...scores.map(s => s.score)) + 50;
 
@@ -1214,16 +1434,85 @@ function drawChart() {
     ctx.restore();
   }
 
+  chartHits = [];
   pts.forEach((p, i) => {
+    const s = scores[i];
+    const radius = s.has_photo ? 6 : 4;
     ctx.beginPath();
-    ctx.arc(p.px, p.py, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#e8e8e8';
+    ctx.arc(p.px, p.py, radius, 0, Math.PI * 2);
+    ctx.fillStyle = s.has_photo ? '#e81a1a' : '#e8e8e8';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(232, 26, 26, 0.6)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = s.has_photo ? '#fff' : 'rgba(232, 26, 26, 0.6)';
+    ctx.lineWidth = s.has_photo ? 2 : 1.5;
     ctx.stroke();
+    chartHits.push({ px: p.px, py: p.py, score: s });
   });
 }
+
+// ---- Chart click → score routing ----
+
+(function setupChartClicks() {
+  const canvas = document.getElementById('chart');
+  if (!canvas) return;
+  const HIT_RADIUS = 14;  // generous for touch
+
+  function locate(evt) {
+    const rect = canvas.getBoundingClientRect();
+    const cx = evt.clientX - rect.left;
+    const cy = evt.clientY - rect.top;
+    let best = null;
+    let bestDist = HIT_RADIUS * HIT_RADIUS;
+    for (const h of chartHits) {
+      const dx = h.px - cx;
+      const dy = h.py - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestDist) {
+        bestDist = d2;
+        best = h;
+      }
+    }
+    return best;
+  }
+
+  canvas.addEventListener('click', evt => {
+    const hit = locate(evt);
+    if (!hit) return;
+    const s = hit.score;
+    if (s.has_photo) {
+      openPhoto(s.id);
+    } else if (!s.name) {
+      openClaim(s.id, s.score);
+    }
+  });
+
+  canvas.addEventListener('mousemove', evt => {
+    const hit = locate(evt);
+    canvas.style.cursor = (hit && (hit.score.has_photo || !hit.score.name)) ? 'pointer' : 'default';
+  });
+})();
+
+// ---- Photo Lightbox ----
+
+function openPhoto(id) {
+  const s = allScores.find(x => x.id === id);
+  if (!s || !s.has_photo) return;
+  document.getElementById('photo-img').src = '/api/photos/' + id;
+  document.getElementById('photo-name').textContent = s.name || '';
+  document.getElementById('photo-score').textContent = s.score + ' pts';
+  document.getElementById('photo-time').textContent = s.time;
+  document.getElementById('photo-overlay').classList.add('active');
+}
+
+function closePhoto() {
+  document.getElementById('photo-overlay').classList.remove('active');
+  document.getElementById('photo-img').src = '';
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('photo-overlay').classList.contains('active')) {
+    closePhoto();
+  }
+});
 
 // ---- Claim Modal ----
 
@@ -1237,7 +1526,7 @@ function openClaim(id, score) {
   document.getElementById('claim-photo-input').value = '';
 
   const photoRow = document.getElementById('claim-photo-row');
-  photoRow.classList.toggle('visible', !!laptopIp);
+  photoRow.classList.add('visible');
 
   document.getElementById('claim-overlay').classList.add('active');
   document.getElementById('claim-name').focus();
@@ -1271,7 +1560,7 @@ async function saveClaim() {
   btn.textContent = '...';
 
   try {
-    const res = await fetch('/api/claim', {
+    const res = await fetch('/api/scores/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: claimingId, name: name })
@@ -1283,11 +1572,11 @@ async function saveClaim() {
       return;
     }
 
-    if (claimPhotoFile && laptopIp) {
+    if (claimPhotoFile) {
       const formData = new FormData();
       formData.append('photo', claimPhotoFile);
       try {
-        await fetch('http://' + laptopIp + ':6969/api/photos/' + claimingId, {
+        await fetch('/api/photos/' + claimingId, {
           method: 'POST',
           body: formData
         });
@@ -1310,25 +1599,18 @@ async function saveClaim() {
 
 async function fetchScores() {
   try {
-    const res = await fetch('/api/scores');
-    const data = await res.json();
-    allScores = data.scores || [];
-    laptopIp = data.laptop_ip || null;
-    // Update backend status in settings
-    const dot = document.getElementById('backend-dot');
-    const txt = document.getElementById('backend-text');
-    if (laptopIp) {
-      dot.style.background = '#2ecc40';
-      dot.style.boxShadow = '0 0 6px #2ecc40';
-      txt.style.color = 'var(--text)';
-      txt.textContent = 'Connecte (' + laptopIp + ')';
-    } else {
-      dot.style.background = 'var(--text-muted)';
-      dot.style.boxShadow = 'none';
-      txt.style.color = 'var(--text-dim)';
-      txt.textContent = 'Non connecte';
-    }
-    renderScores(allScores);
+    const res = await fetch('/api/scores/history');
+    if (!res.ok) return;
+    const rows = await res.json();
+    // Normalize backend rows to the shape used by renderScores/drawChart
+    allScores = rows.map(r => ({
+      id: r.id,
+      time: String(r.hour).padStart(2, '0') + 'h' + String(r.minute).padStart(2, '0'),
+      score: r.score,
+      name: r.name,
+      has_photo: r.has_photo,
+    }));
+    renderScores(getFilteredScores());
     if (document.getElementById('stats-panel').classList.contains('active')) {
       drawChart();
     }
@@ -1513,73 +1795,6 @@ async function pollLogs() {
   }
 }
 
-// ---- OTA Upload ----
-
-const otaZone = document.getElementById('ota-zone');
-otaZone.addEventListener('dragover', e => { e.preventDefault(); otaZone.classList.add('dragover'); });
-otaZone.addEventListener('dragleave', () => otaZone.classList.remove('dragover'));
-otaZone.addEventListener('drop', e => {
-  e.preventDefault();
-  otaZone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) startOta(e.dataTransfer.files[0]);
-});
-
-async function startOta(file) {
-  if (!file || !file.name.endsWith('.bin')) {
-    alert('Selectionner un fichier .bin');
-    return;
-  }
-
-  const zone = document.getElementById('ota-zone');
-  const progress = document.getElementById('ota-progress');
-  const fill = document.getElementById('progress-fill');
-  const status = document.getElementById('ota-status');
-
-  zone.classList.add('uploading');
-  progress.classList.add('active');
-  status.className = 'ota-status';
-  status.textContent = 'Upload en cours... 0%';
-  fill.style.width = '0%';
-
-  try {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/ota', true);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100);
-        fill.style.width = pct + '%';
-        status.textContent = 'Upload en cours... ' + pct + '%';
-      }
-    };
-
-    xhr.onload = () => {
-      if (xhr.status === 200) {
-        fill.style.width = '100%';
-        status.className = 'ota-status success';
-        status.textContent = 'Mise a jour reussie ! Redemarrage...';
-        setTimeout(() => { location.reload(); }, 5000);
-      } else {
-        status.className = 'ota-status error';
-        status.textContent = 'Erreur: ' + (xhr.responseText || xhr.status);
-        zone.classList.remove('uploading');
-      }
-    };
-
-    xhr.onerror = () => {
-      status.className = 'ota-status error';
-      status.textContent = 'Erreur de connexion';
-      zone.classList.remove('uploading');
-    };
-
-    xhr.send(file);
-  } catch (e) {
-    status.className = 'ota-status error';
-    status.textContent = 'Erreur: ' + e.message;
-    zone.classList.remove('uploading');
-  }
-}
 </script>
 
 </body>

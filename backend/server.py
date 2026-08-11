@@ -1,17 +1,56 @@
+import asyncio
+import io
+import json
+import socket as _socket
 import sqlite3
-import httpx
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import qrcode
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from zeroconf import ServiceInfo
+from zeroconf.asyncio import AsyncZeroconf
 
-ESP32_IP = "192.168.4.1"
 PHOTOS_DIR = Path(__file__).parent / "photos"
 DB_PATH = Path(__file__).parent / "bapthit.db"
+
+
+# Default PunchMeter config — must mirror the struct in main/main.cpp
+DEFAULT_CONFIG = {
+    "maxScore":         20000,
+    "minScore":         100000,
+    "defaultRollDelay": 15,
+    "rollDelayMod":     1,
+    "rollThresh":       60,
+    "slowRollThresh":   7,
+    "slowRollDelayMod": 100,
+    "defaultIncrement": 15,
+    "blinkDelay":       600,
+    "waveDuration":     1500,
+    "waveDelay":        200,
+}
+CONFIG_KEYS = list(DEFAULT_CONFIG.keys())
+
+# In-memory log buffer fed from the device over WS
+LOG_BUFFER_MAX = 500
+log_buffer: deque = deque(maxlen=LOG_BUFFER_MAX)
+log_seq = 0
+
+# Per-boot id remapping. The ESP's score id counter resets to 1 on every
+# reboot, which would otherwise collide with rows already in the scores
+# table (INSERT OR IGNORE silently drops them). When we see a new boot id
+# in a hello frame, we snapshot MAX(scores.id) and use it as an offset:
+# the first esp_id=1 becomes db_id = max+1, the next becomes max+2, etc.
+# A reconnect with the same boot id keeps the same offset, so FIFO
+# replays after a transient network blip stay consistent.
+device_boot_id: int | None = None
+device_id_offset: int = 0
 
 
 def get_db():
@@ -32,28 +71,135 @@ def init_db():
             has_photo INTEGER NOT NULL DEFAULT 0
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )
+    """)
+    count = conn.execute("SELECT COUNT(*) FROM config").fetchone()[0]
+    if count == 0:
+        conn.executemany(
+            "INSERT INTO config (key, value) VALUES (?, ?)",
+            [(k, v) for k, v in DEFAULT_CONFIG.items()],
+        )
     conn.commit()
     conn.close()
 
 
-async def register_with_esp32(my_ip: str):
-    """Register this backend with the ESP32 and sync its wall clock."""
-    now = datetime.now()
+def load_config() -> dict:
+    """Load the full config from DB. Falls back to DEFAULT_CONFIG on corruption."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"http://{ESP32_IP}/api/backend",
-                json={
-                    "ip": my_ip,
-                    "hour": now.hour,
-                    "minute": now.minute,
-                    "second": now.second,
-                },
-            )
-            print(f"Registered with ESP32 as {my_ip} at {now:%H:%M:%S}")
+        conn = get_db()
+        rows = conn.execute("SELECT key, value FROM config").fetchall()
+        conn.close()
+        cfg = {r["key"]: r["value"] for r in rows}
+        for k, v in DEFAULT_CONFIG.items():
+            cfg.setdefault(k, v)
+        return cfg
     except Exception as e:
-        print(f"Failed to register with ESP32: {e}")
-        print("Will retry when ESP32 is available.")
+        print(f"Config load failed, using defaults: {e}")
+        return dict(DEFAULT_CONFIG)
+
+
+# Anything before this looks like ESP uptime rather than a real epoch.
+# Without SNTP, ESP-IDF returns "seconds since boot" from time(NULL) instead
+# of seconds since 1970, so a 1h-uptime device sends ts=3600 which would be
+# stored as "01h00". Detect that and fall back to the backend wall clock.
+TS_EPOCH_FLOOR = 1577836800  # 2020-01-01 UTC
+
+
+def insert_score(id_: int, score: int, ts_epoch: int) -> None:
+    dt = datetime.fromtimestamp(ts_epoch) if ts_epoch >= TS_EPOCH_FLOOR else datetime.now()
+    db_id = id_ + device_id_offset
+    conn = get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO scores (id, hour, minute, score) VALUES (?, ?, ?, ?)",
+        (db_id, dt.hour, dt.minute, score),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _refresh_id_offset() -> None:
+    """Snapshot MAX(scores.id) so the next esp_id starts above it."""
+    global device_id_offset
+    conn = get_db()
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM scores").fetchone()
+    conn.close()
+    device_id_offset = int(row[0])
+    print(f"id offset reset to {device_id_offset}")
+
+
+def save_config(updates: dict) -> dict:
+    """Update the given keys in DB. Returns the full merged config."""
+    conn = get_db()
+    for k, v in updates.items():
+        if k in DEFAULT_CONFIG:
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (k, int(v)),
+            )
+    conn.commit()
+    conn.close()
+    return load_config()
+
+
+MDNS_SERVICE_TYPE = "_bapthit._tcp.local."
+MDNS_NAME = "bapthit"
+MDNS_PORT = 6969
+
+# Path to the gitignored ESP credentials overlay. The backend reads this
+# at startup so it can publish a join-the-WiFi QR code without ever
+# needing to know the password as a separate config knob.
+SDKCONFIG_LOCAL = Path(__file__).parent.parent / "sdkconfig.defaults.local"
+
+
+def _parse_sdkconfig_local() -> dict:
+    """Extract the BAPTHIT_WIFI_* values from sdkconfig.defaults.local."""
+    out = {"ssid": "", "password": ""}
+    if not SDKCONFIG_LOCAL.exists():
+        return out
+    try:
+        for raw in SDKCONFIG_LOCAL.read_text().splitlines():
+            line = raw.strip()
+            if line.startswith("CONFIG_BAPTHIT_WIFI_SSID="):
+                out["ssid"] = line.split("=", 1)[1].strip().strip('"')
+            elif line.startswith("CONFIG_BAPTHIT_WIFI_PASS="):
+                out["password"] = line.split("=", 1)[1].strip().strip('"')
+    except Exception as e:
+        print(f"sdkconfig parse failed: {e}")
+    return out
+
+
+def _wifi_qr_payload(ssid: str, password: str) -> str:
+    """Format per the de-facto WiFi QR standard scanned by Android/iOS."""
+    def esc(s: str) -> str:
+        # Escape backslash, semicolon, comma, colon, and quote per spec
+        for ch in ("\\", ";", ",", ":", '"'):
+            s = s.replace(ch, "\\" + ch)
+        return s
+    auth = "WPA" if password else "nopass"
+    return f"WIFI:T:{auth};S:{esc(ssid)};P:{esc(password)};H:false;;"
+
+
+def _qr_png(payload: str) -> bytes:
+    img = qrcode.make(payload, box_size=10, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _local_ip() -> str:
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 @asynccontextmanager
@@ -61,19 +207,23 @@ async def lifespan(app: FastAPI):
     init_db()
     PHOTOS_DIR.mkdir(exist_ok=True)
 
-    # Detect our IP on the BAPTHIT network
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ip = _local_ip()
+    print(f"Publishing mDNS: {MDNS_NAME}.local -> {ip}:{MDNS_PORT}")
+    aiozc = AsyncZeroconf()
+    info = ServiceInfo(
+        MDNS_SERVICE_TYPE,
+        f"{MDNS_NAME}.{MDNS_SERVICE_TYPE}",
+        addresses=[_socket.inet_aton(ip)],
+        port=MDNS_PORT,
+        server=f"{MDNS_NAME}.local.",
+        properties={},
+    )
+    await aiozc.async_register_service(info)
     try:
-        s.connect((ESP32_IP, 80))
-        my_ip = s.getsockname()[0]
-    except Exception:
-        my_ip = "127.0.0.1"
+        yield
     finally:
-        s.close()
-
-    await register_with_esp32(my_ip)
-    yield
+        await aiozc.async_unregister_service(info)
+        await aiozc.async_close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -88,36 +238,56 @@ app.add_middleware(
 
 # --- Models ---
 
-class ScoreIn(BaseModel):
-    id: int
-    hour: int
-    minute: int
-    score: int
-
-
 class ClaimIn(BaseModel):
     id: int
     name: str
 
 
+# --- Device WebSocket manager ---
+
+class DeviceManager:
+    """Singleton-ish holder for the single connected ESP device."""
+
+    def __init__(self):
+        self._ws: WebSocket | None = None
+        self._lock = asyncio.Lock()
+
+    async def attach(self, ws: WebSocket):
+        async with self._lock:
+            if self._ws is not None:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+            self._ws = ws
+
+    async def detach(self, ws: WebSocket):
+        async with self._lock:
+            if self._ws is ws:
+                self._ws = None
+
+    def is_connected(self) -> bool:
+        return self._ws is not None
+
+    async def send_json(self, msg: dict) -> bool:
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_text(json.dumps(msg))
+            return True
+        except Exception as e:
+            print(f"DeviceManager send failed: {e}")
+            return False
+
+
+device_manager = DeviceManager()
+
+
 # --- Endpoints ---
-
-@app.post("/api/scores")
-def receive_score(data: ScoreIn):
-    """ESP32 pushes new scores here."""
-    conn = get_db()
-    conn.execute(
-        "INSERT OR IGNORE INTO scores (id, hour, minute, score) VALUES (?, ?, ?, ?)",
-        (data.id, data.hour, data.minute, data.score),
-    )
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
 
 @app.post("/api/scores/claim")
 def receive_claim(data: ClaimIn):
-    """ESP32 forwards claims here."""
     conn = get_db()
     conn.execute(
         "UPDATE scores SET name = ? WHERE id = ?",
@@ -128,9 +298,90 @@ def receive_claim(data: ClaimIn):
     return {"ok": True}
 
 
+@app.websocket("/ws/device")
+async def device_ws(ws: WebSocket):
+    await ws.accept()
+    await device_manager.attach(ws)
+    print("Device connected")
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                print(f"Device: bad JSON: {raw[:80]}")
+                continue
+            mtype = msg.get("type")
+            if mtype == "hello":
+                fw = msg.get("fw", "?")
+                boot = msg.get("boot")
+                global device_boot_id
+                if boot is None:
+                    print(f"Device hello: fw={fw} (no boot id)")
+                elif boot != device_boot_id:
+                    print(f"Device hello: fw={fw} boot={boot} (new session)")
+                    device_boot_id = boot
+                    _refresh_id_offset()
+                else:
+                    print(f"Device hello: fw={fw} boot={boot} (reconnect)")
+                await device_manager.send_json({"type": "config", **load_config()})
+            elif mtype == "score":
+                try:
+                    sid = int(msg["id"])
+                    sval = int(msg["score"])
+                    sts = int(msg.get("ts", 0))
+                except (KeyError, ValueError, TypeError):
+                    print(f"Device: bad score msg: {msg}")
+                    continue
+                insert_score(sid, sval, sts)
+                print(f"Device score: id={sid} val={sval}")
+            elif mtype == "log":
+                global log_seq
+                log_seq += 1
+                log_buffer.append({
+                    "s": log_seq,
+                    "t": int(datetime.now().timestamp() * 1000),
+                    "level": msg.get("level", "I"),
+                    "m": str(msg.get("msg", ""))[:200],
+                })
+            else:
+                print(f"Device: unknown msg type: {mtype}")
+    except WebSocketDisconnect:
+        print("Device disconnected")
+    finally:
+        await device_manager.detach(ws)
+
+
+@app.get("/api/config")
+def get_config():
+    return load_config()
+
+
+@app.post("/api/config")
+async def update_config(payload: dict):
+    # Validate: only known keys, ints only
+    filtered = {}
+    for k in CONFIG_KEYS:
+        if k in payload:
+            try:
+                filtered[k] = int(payload[k])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"Invalid value for {k}")
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No valid keys")
+    cfg = save_config(filtered)
+    if device_manager.is_connected():
+        await device_manager.send_json({"type": "config", **cfg})
+    return cfg
+
+
+@app.get("/api/logs")
+def get_logs(since: int = 0):
+    return {"logs": [e for e in log_buffer if e["s"] > since]}
+
+
 @app.get("/api/scores/history")
 def get_history():
-    """ESP32 fetches all persisted scores on boot."""
     conn = get_db()
     rows = conn.execute(
         "SELECT id, hour, minute, score, name, has_photo FROM scores ORDER BY id"
@@ -151,41 +402,56 @@ def get_history():
 
 @app.post("/api/photos/{score_id}")
 async def upload_photo(score_id: int, photo: UploadFile = File(...)):
-    """Phone uploads photo directly here."""
-    # Save photo
     photo_path = PHOTOS_DIR / f"{score_id}.jpg"
-    MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10 MB
+    MAX_PHOTO_SIZE = 10 * 1024 * 1024
     contents = await photo.read(MAX_PHOTO_SIZE + 1)
     if len(contents) > MAX_PHOTO_SIZE:
         raise HTTPException(status_code=413, detail="Photo too large (max 10 MB)")
     photo_path.write_bytes(contents)
 
-    # Update DB
     conn = get_db()
     conn.execute("UPDATE scores SET has_photo = 1 WHERE id = ?", (score_id,))
     conn.commit()
     conn.close()
-
-    # Notify ESP32
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"http://{ESP32_IP}/api/photo_ok",
-                json={"id": score_id},
-            )
-    except Exception:
-        pass  # ESP32 will pick it up on next history fetch
 
     return {"ok": True}
 
 
 @app.get("/api/photos/{score_id}")
 def get_photo(score_id: int):
-    """Phone fetches photo for display."""
     photo_path = PHOTOS_DIR / f"{score_id}.jpg"
     if not photo_path.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
     return FileResponse(photo_path, media_type="image/jpeg")
+
+
+@app.get("/api/qr/wifi")
+def qr_wifi():
+    creds = _parse_sdkconfig_local()
+    if not creds["ssid"]:
+        raise HTTPException(status_code=404, detail="WiFi SSID not configured")
+    payload = _wifi_qr_payload(creds["ssid"], creds["password"])
+    return Response(content=_qr_png(payload), media_type="image/png")
+
+
+@app.get("/api/qr/url")
+def qr_url():
+    payload = f"http://{MDNS_NAME}.local:{MDNS_PORT}/"
+    return Response(content=_qr_png(payload), media_type="image/png")
+
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/")
+def root():
+    index = STATIC_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=404, detail="UI not built")
+    return FileResponse(index, media_type="text/html")
+
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":

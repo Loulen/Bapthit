@@ -3,515 +3,93 @@
 #include <string.h>
 #include <time.h>
 #include "esp_log.h"
-#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
-#include "esp_http_server.h"
+#include "esp_app_format.h"
 #include "esp_random.h"
 #include "nvs_flash.h"
-#include "lwip/sockets.h"
-#include "lwip/netdb.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
+#include "mdns.h"
+#include "sdkconfig.h"
+
 #include "punchmeter_api.h"
-#include "esp_http_client.h"
+#include "wifi_sta.h"
+#include "score_queue.h"
+#include "ws_client.h"
 
 static const char *TAG = "bapthit";
 
-#ifdef BAPTHIT_DEV
-#define WIFI_SSID "BAPTHIT-DEV"
-#else
-#define WIFI_SSID "BAPTHIT"
-#endif
-#define WIFI_CHANNEL 1
-#define MAX_STA_CONN 8
-
 // ---------------------------------------------------------------------------
-// PunchMeter integration — score queue + config
+// Shared PunchMeter config protected by mutex
 // ---------------------------------------------------------------------------
 
-#define SCORE_QUEUE_SIZE 16
-
 typedef struct {
-    int score;
-    int64_t timestamp_ms;
-} score_event_t;
+    PunchmeterConfig cfg;
+    bool             dirty;
+    SemaphoreHandle_t mux;
+} shared_cfg_t;
 
-static QueueHandle_t score_queue = NULL;
-
-// Shared config protected by mutex
-typedef struct {
-    unsigned long maxScore;
-    unsigned long minScore;
-    int defaultRollDelay;
-    int rollDelayMod;
-    int rollThresh;
-    int slowRollThresh;
-    int slowRollDelayMod;
-    int defaultIncrement;
-    int blinkDelay;
-    int waveDuration;
-    int waveDelay;
-} shared_config_t;
-
-static shared_config_t shared_config = {
-    .maxScore         = 20000,
-    .minScore         = 100000,
-    .defaultRollDelay = 15,
-    .rollDelayMod     = 1,
-    .rollThresh       = 60,
-    .slowRollThresh   = 7,
-    .slowRollDelayMod = 100,
-    .defaultIncrement = 15,
-    .blinkDelay       = 600,
-    .waveDuration     = 1500,
-    .waveDelay        = 200,
+static shared_cfg_t s_cfg = {
+    .cfg = {
+        .maxScore         = 20000,
+        .minScore         = 100000,
+        .defaultRollDelay = 15,
+        .rollDelayMod     = 1,
+        .rollThresh       = 60,
+        .slowRollThresh   = 7,
+        .slowRollDelayMod = 100,
+        .defaultIncrement = 15,
+        .blinkDelay       = 600,
+        .waveDuration     = 1500,
+        .waveDelay        = 200,
+    },
+    .dirty = true,  // apply defaults once at boot
+    .mux = NULL,
 };
-// Set to true whenever shared_config changes; the punchmeter task
-// clears it after pushing the new config down to the library. True at
-// boot so the initial values are applied once.
-static volatile bool shared_config_dirty = true;
-static SemaphoreHandle_t config_mutex = NULL;
+
+static int      s_next_score_id = 1;
+static uint32_t s_boot_id = 0;  // randomized once at boot, sent to backend
 
 // ---------------------------------------------------------------------------
-// Score store
+// Punchmeter log sink — forward to ESP_LOG and stream to backend over WS
 // ---------------------------------------------------------------------------
 
-#define MAX_SCORES 64
-#define MAX_NAME_LEN 32
-
-typedef struct {
-    int id;
-    int hour;
-    int minute;
-    int score;
-    char name[MAX_NAME_LEN];  // empty = unclaimed
-    bool has_photo;
-} score_entry_t;
-
-static score_entry_t scores[MAX_SCORES];
-static int score_count = 0;
-static int next_score_id = 1;
-
-// Laptop backend (empty = not registered)
-static char laptop_ip[16] = "";
-
-// ---------------------------------------------------------------------------
-// Punchmeter log ring buffer
-// ---------------------------------------------------------------------------
-
-#define LOG_BUF_SIZE 64
-#define LOG_MSG_LEN  120
-
-typedef struct {
-    uint32_t seq;      // monotonic, 0 = empty slot
-    uint32_t ts_ms;
-    char     msg[LOG_MSG_LEN];
-} log_entry_t;
-
-static log_entry_t log_buf[LOG_BUF_SIZE];
-static int         log_head = 0;
-static uint32_t    log_next_seq = 1;
-static SemaphoreHandle_t log_mutex = NULL;
+// JSON-escape a single message into the destination buffer. We strip the
+// few characters that would break JSON (quotes, backslashes, controls)
+// rather than escaping them — the PunchMeter log format is plain ASCII.
+static int sanitize_log_msg(char *dst, size_t dst_len, const char *src)
+{
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
+        char c = src[i];
+        if (c != '"' && c != '\\' && c >= 0x20) {
+            dst[j++] = c;
+        }
+    }
+    dst[j] = '\0';
+    return (int)j;
+}
 
 static void pm_log_sink(const char *msg)
 {
-    if (!log_mutex) return;
-    xSemaphoreTake(log_mutex, portMAX_DELAY);
-    log_entry_t *e = &log_buf[log_head];
-    e->seq = log_next_seq++;
-    e->ts_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    int j = 0;
-    for (int i = 0; msg[i] && j < LOG_MSG_LEN - 1; i++) {
-        char c = msg[i];
-        if (c != '"' && c != '\\' && c >= 0x20) e->msg[j++] = c;
-    }
-    e->msg[j] = '\0';
-    log_head = (log_head + 1) % LOG_BUF_SIZE;
-    xSemaphoreGive(log_mutex);
     ESP_LOGI("PM", "%s", msg);
+    if (!ws_client_is_connected()) return;
+    char clean[160];
+    sanitize_log_msg(clean, sizeof(clean), msg);
+    char frame[224];
+    int n = snprintf(frame, sizeof(frame),
+        "{\"type\":\"log\",\"level\":\"I\",\"msg\":\"%s\"}", clean);
+    if (n > 0) ws_client_send_text(frame, (size_t)n);
 }
 
 // ---------------------------------------------------------------------------
-// Wall-clock sync — one-shot from backend register
+// JSON helpers (tiny parsers; same shape as the legacy main.cpp)
 // ---------------------------------------------------------------------------
 
-static int     sync_hour = 0, sync_minute = 0, sync_second = 0;
-static int64_t sync_boot_ms = 0;
-static bool    time_synced = false;
-
-static void compute_wall_clock(int *out_hour, int *out_minute)
-{
-    if (!time_synced) {
-        int64_t ms = esp_timer_get_time() / 1000;
-        int64_t total_min = ms / 60000;
-        *out_hour   = (int)(total_min / 60) % 24;
-        *out_minute = (int)(total_min % 60);
-        return;
-    }
-    int64_t now_ms  = esp_timer_get_time() / 1000;
-    int64_t delta_s = (now_ms - sync_boot_ms) / 1000;
-    int64_t total_s = (int64_t)sync_hour * 3600
-                    + (int64_t)sync_minute * 60
-                    + sync_second + delta_s;
-    int64_t day_s   = ((total_s % 86400) + 86400) % 86400;
-    *out_hour   = (int)(day_s / 3600);
-    *out_minute = (int)((day_s / 60) % 60);
-}
-
-// Forwarding queue to laptop backend
-#define FWD_QUEUE_SIZE 16
-
-typedef enum {
-    FWD_SCORE,
-    FWD_CLAIM,
-} fwd_type_t;
-
-typedef struct {
-    fwd_type_t type;
-    int id;
-    int hour;
-    int minute;
-    int score;
-    char name[MAX_NAME_LEN];
-} fwd_event_t;
-
-static QueueHandle_t fwd_queue = NULL;
-
-static void add_score(int hour, int minute, int score)
-{
-    if (score_count < MAX_SCORES) {
-        scores[score_count].id = next_score_id++;
-        scores[score_count].hour = hour;
-        scores[score_count].minute = minute;
-        scores[score_count].score = score;
-        scores[score_count].name[0] = '\0';
-        scores[score_count].has_photo = false;
-        score_count++;
-        // Forward to laptop
-        if (fwd_queue) {
-            fwd_event_t fwd = {};
-            fwd.type = FWD_SCORE;
-            fwd.id = scores[score_count - 1].id;
-            fwd.hour = hour;
-            fwd.minute = minute;
-            fwd.score = score;
-            xQueueSend(fwd_queue, &fwd, 0);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PunchMeter task (runs on core 1)
-// ---------------------------------------------------------------------------
-
-static void punchmeter_task(void *arg)
-{
-    punchmeter_setup();
-
-    int prev_score = -1;
-
-    while (1) {
-        // Push config updates only when something actually changed.
-        // Otherwise we spam the library (and the serial UART) at ~100 Hz.
-        if (shared_config_dirty && xSemaphoreTake(config_mutex, 0) == pdTRUE) {
-            PunchmeterConfig cfg;
-            cfg.maxScore         = shared_config.maxScore;
-            cfg.minScore         = shared_config.minScore;
-            cfg.defaultRollDelay = shared_config.defaultRollDelay;
-            cfg.rollDelayMod     = shared_config.rollDelayMod;
-            cfg.rollThresh       = shared_config.rollThresh;
-            cfg.slowRollThresh   = shared_config.slowRollThresh;
-            cfg.slowRollDelayMod = shared_config.slowRollDelayMod;
-            cfg.defaultIncrement = shared_config.defaultIncrement;
-            cfg.blinkDelay       = shared_config.blinkDelay;
-            cfg.waveDuration     = shared_config.waveDuration;
-            cfg.waveDelay        = shared_config.waveDelay;
-            shared_config_dirty = false;
-            xSemaphoreGive(config_mutex);
-            // Apply outside the mutex: set_config only touches the library's
-            // private statics, and we already have a local copy.
-            punchmeter_set_config(&cfg);
-        }
-
-        punchmeter_loop();
-
-        // Push new score to queue when it changes
-        int current_score = punchmeter_get_last_score();
-        if (current_score >= 0 && current_score != prev_score) {
-            score_event_t evt = {
-                .score = current_score,
-                .timestamp_ms = esp_timer_get_time() / 1000,
-            };
-            xQueueSend(score_queue, &evt, 0);
-            prev_score = current_score;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HTTP server
-// ---------------------------------------------------------------------------
-
-static void drain_score_queue(void)
-{
-    score_event_t evt;
-    while (xQueueReceive(score_queue, &evt, 0) == pdTRUE) {
-        int hour, minute;
-        compute_wall_clock(&hour, &minute);
-        add_score(hour, minute, evt.score);
-    }
-}
-
-static esp_err_t scores_get_handler(httpd_req_t *req)
-{
-    drain_score_queue();
-
-    // Larger buffer: id + name + has_photo per entry
-    char *buf = (char *)malloc(8192);
-    if (!buf) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-
-    int pos = sprintf(buf, "{\"scores\":[");
-    for (int i = 0; i < score_count; i++) {
-        if (pos > 7800) break;  // safety margin
-        if (i > 0) buf[pos++] = ',';
-        pos += sprintf(buf + pos,
-            "{\"id\":%d,\"time\":\"%02dh%02d\",\"score\":%d,\"name\":\"%s\",\"has_photo\":%s}",
-            scores[i].id,
-            scores[i].hour, scores[i].minute,
-            scores[i].score,
-            scores[i].name,
-            scores[i].has_photo ? "true" : "false");
-    }
-    pos += sprintf(buf + pos, "],\"laptop_ip\":%s%s%s}",
-        laptop_ip[0] ? "\"" : "null",
-        laptop_ip[0] ? laptop_ip : "",
-        laptop_ip[0] ? "\"" : "");
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_send(req, buf, pos);
-    free(buf);
-    return ESP_OK;
-}
-
-static esp_err_t claim_post_handler(httpd_req_t *req)
-{
-    char buf[128];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
-
-    // Parse "id" field
-    char *id_key = strstr(buf, "\"id\"");
-    if (!id_key) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id");
-        return ESP_FAIL;
-    }
-    char *colon = strchr(id_key, ':');
-    if (!colon) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid id");
-        return ESP_FAIL;
-    }
-    int id = atoi(colon + 1);
-
-    // Parse "name" field
-    char *name_key = strstr(buf, "\"name\"");
-    if (!name_key) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing name");
-        return ESP_FAIL;
-    }
-    char *name_colon = strchr(name_key, ':');
-    if (!name_colon) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid name");
-        return ESP_FAIL;
-    }
-    char *quote1 = strchr(name_colon, '"');
-    if (!quote1) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid name");
-        return ESP_FAIL;
-    }
-    quote1++; // skip opening quote
-    char *quote2 = strchr(quote1, '"');
-    if (!quote2) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid name");
-        return ESP_FAIL;
-    }
-
-    // Find score by ID
-    int idx = -1;
-    for (int i = 0; i < score_count; i++) {
-        if (scores[i].id == id) { idx = i; break; }
-    }
-    if (idx < 0) {
-        httpd_resp_set_status(req, "404 Not Found");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"Score not found\"}");
-        return ESP_OK;
-    }
-    if (scores[idx].name[0] != '\0') {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"Already claimed\"}");
-        return ESP_OK;
-    }
-
-    // Copy name, sanitizing JSON-breaking characters
-    int src_len = quote2 - quote1;
-    int dst = 0;
-    for (int i = 0; i < src_len && dst < MAX_NAME_LEN - 1; i++) {
-        char c = quote1[i];
-        if (c != '"' && c != '\\') {
-            scores[idx].name[dst++] = c;
-        }
-    }
-    scores[idx].name[dst] = '\0';
-    if (dst == 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Name is empty");
-        return ESP_FAIL;
-    }
-
-    // Forward to laptop
-    if (fwd_queue) {
-        fwd_event_t fwd = {};
-        fwd.type = FWD_CLAIM;
-        fwd.id = id;
-        strncpy(fwd.name, scores[idx].name, MAX_NAME_LEN - 1);
-        fwd.name[MAX_NAME_LEN - 1] = '\0';
-        xQueueSend(fwd_queue, &fwd, 0);
-    }
-
-    ESP_LOGI(TAG, "Score %d claimed by '%s'", id, scores[idx].name);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
-}
-
-// Embedded HTML file
-extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
-
-static esp_err_t root_get_handler(httpd_req_t *req)
-{
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, (const char *)index_html_start,
-                    index_html_end - index_html_start);
-    return ESP_OK;
-}
-
-// OTA update handler — receives firmware binary via POST
-static esp_err_t ota_post_handler(httpd_req_t *req)
-{
-    ESP_LOGI(TAG, "OTA update started, content length: %d", req->content_len);
-
-    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
-    if (!update_partition) {
-        ESP_LOGE(TAG, "OTA: no update partition found");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No update partition");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "OTA: writing to partition '%s' at offset 0x%lx",
-             update_partition->label, update_partition->address);
-
-    esp_ota_handle_t ota_handle;
-    esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
-        return ESP_FAIL;
-    }
-
-    char *buf = (char *)malloc(4096);
-    if (!buf) {
-        esp_ota_abort(ota_handle);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
-        return ESP_FAIL;
-    }
-
-    int remaining = req->content_len;
-    int received_total = 0;
-
-    while (remaining > 0) {
-        int received = httpd_req_recv(req, buf, (remaining < 4096) ? remaining : 4096);
-        if (received <= 0) {
-            if (received == HTTPD_SOCK_ERR_TIMEOUT) continue;
-            ESP_LOGE(TAG, "OTA: receive error");
-            free(buf);
-            esp_ota_abort(ota_handle);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
-            return ESP_FAIL;
-        }
-
-        err = esp_ota_write(ota_handle, buf, received);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "OTA write failed: %s", esp_err_to_name(err));
-            free(buf);
-            esp_ota_abort(ota_handle);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
-            return ESP_FAIL;
-        }
-
-        remaining -= received;
-        received_total += received;
-
-        if (received_total % (64 * 1024) < 4096) {
-            ESP_LOGI(TAG, "OTA progress: %d/%d bytes", received_total, req->content_len);
-        }
-    }
-
-    free(buf);
-
-    err = esp_ota_end(ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Validation failed");
-        return ESP_FAIL;
-    }
-
-    err = esp_ota_set_boot_partition(update_partition);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA set boot partition failed: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot failed");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "OTA update successful! Rebooting in 1s...");
-    httpd_resp_sendstr(req, "OK");
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
-
-    return ESP_OK;
-}
-
-// Captive portal: redirect all unknown URLs to root
-// Android checks: /generate_204, /gen_204, /connecttest.txt
-// iOS checks: /hotspot-detect.html
-// Windows checks: /ncsi.txt, /connecttest.txt
-static esp_err_t captive_redirect_handler(httpd_req_t *req)
-{
-    httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
-    httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
-}
-
-// Parse an integer following "\"key\":" in buf. Returns true if found.
 static bool json_parse_int(const char *buf, const char *key, int *out)
 {
     char needle[40];
@@ -524,7 +102,6 @@ static bool json_parse_int(const char *buf, const char *key, int *out)
     return true;
 }
 
-// Parse an unsigned long following "\"key\":" in buf. Rejects zero.
 static bool json_parse_ulong(const char *buf, const char *key, unsigned long *out)
 {
     char needle[40];
@@ -533,690 +110,164 @@ static bool json_parse_ulong(const char *buf, const char *key, unsigned long *ou
     if (!k) return false;
     const char *colon = strchr(k, ':');
     if (!colon) return false;
-    unsigned long val = strtoul(colon + 1, NULL, 10);
-    if (val == 0) return false;
-    *out = val;
+    *out = strtoul(colon + 1, NULL, 10);
     return true;
 }
 
-static esp_err_t config_post_handler(httpd_req_t *req)
+// ---------------------------------------------------------------------------
+// WS message handling
+// ---------------------------------------------------------------------------
+
+static void apply_config_from_json(const char *buf)
 {
-    char buf[512];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
-
-    xSemaphoreTake(config_mutex, portMAX_DELAY);
-
+    xSemaphoreTake(s_cfg.mux, portMAX_DELAY);
     unsigned long ul_val;
     int int_val;
-
-    if (json_parse_ulong(buf, "maxScore",         &ul_val))  shared_config.maxScore         = ul_val;
-    if (json_parse_ulong(buf, "minScore",         &ul_val))  shared_config.minScore         = ul_val;
-    if (json_parse_int  (buf, "defaultRollDelay", &int_val)) shared_config.defaultRollDelay = int_val;
-    if (json_parse_int  (buf, "rollDelayMod",     &int_val)) shared_config.rollDelayMod     = int_val;
-    if (json_parse_int  (buf, "rollThresh",       &int_val)) shared_config.rollThresh       = int_val;
-    if (json_parse_int  (buf, "slowRollThresh",   &int_val)) shared_config.slowRollThresh   = int_val;
-    if (json_parse_int  (buf, "slowRollDelayMod", &int_val)) shared_config.slowRollDelayMod = int_val;
-    if (json_parse_int  (buf, "defaultIncrement", &int_val)) shared_config.defaultIncrement = int_val;
-    if (json_parse_int  (buf, "blinkDelay",       &int_val)) shared_config.blinkDelay       = int_val;
-    if (json_parse_int  (buf, "waveDuration",     &int_val)) shared_config.waveDuration     = int_val;
-    if (json_parse_int  (buf, "waveDelay",        &int_val)) shared_config.waveDelay        = int_val;
-
-    shared_config_dirty = true;
-    ESP_LOGI(TAG, "Config updated");
-
-    xSemaphoreGive(config_mutex);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    if (json_parse_ulong(buf, "maxScore",         &ul_val))  s_cfg.cfg.maxScore         = ul_val;
+    if (json_parse_ulong(buf, "minScore",         &ul_val))  s_cfg.cfg.minScore         = ul_val;
+    if (json_parse_int  (buf, "defaultRollDelay", &int_val)) s_cfg.cfg.defaultRollDelay = int_val;
+    if (json_parse_int  (buf, "rollDelayMod",     &int_val)) s_cfg.cfg.rollDelayMod     = int_val;
+    if (json_parse_int  (buf, "rollThresh",       &int_val)) s_cfg.cfg.rollThresh       = int_val;
+    if (json_parse_int  (buf, "slowRollThresh",   &int_val)) s_cfg.cfg.slowRollThresh   = int_val;
+    if (json_parse_int  (buf, "slowRollDelayMod", &int_val)) s_cfg.cfg.slowRollDelayMod = int_val;
+    if (json_parse_int  (buf, "defaultIncrement", &int_val)) s_cfg.cfg.defaultIncrement = int_val;
+    if (json_parse_int  (buf, "blinkDelay",       &int_val)) s_cfg.cfg.blinkDelay       = int_val;
+    if (json_parse_int  (buf, "waveDuration",     &int_val)) s_cfg.cfg.waveDuration     = int_val;
+    if (json_parse_int  (buf, "waveDelay",        &int_val)) s_cfg.cfg.waveDelay        = int_val;
+    s_cfg.dirty = true;
+    xSemaphoreGive(s_cfg.mux);
+    ESP_LOGI(TAG, "config received from backend");
 }
 
-static esp_err_t logs_get_handler(httpd_req_t *req)
+static void on_ws_text(const char *data, size_t len)
 {
-    uint32_t since = 0;
-    size_t qlen = httpd_req_get_url_query_len(req);
-    if (qlen > 0 && qlen < 64) {
-        char query[64];
-        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-            char val[16];
-            if (httpd_query_key_value(query, "since", val, sizeof(val)) == ESP_OK) {
-                since = strtoul(val, NULL, 10);
-            }
-        }
+    char  stackbuf[512];
+    char *buf = stackbuf;
+    if (len >= sizeof(stackbuf)) {
+        buf = (char *)malloc(len + 1);
+        if (!buf) return;
     }
+    memcpy(buf, data, len);
+    buf[len] = '\0';
 
-    char *buf = (char *)malloc(12288);
-    if (!buf) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-
-    int pos = sprintf(buf, "{\"logs\":[");
-    bool first = true;
-
-    xSemaphoreTake(log_mutex, portMAX_DELAY);
-    // Iterate oldest → newest: the slot at log_head is the next one to
-    // overwrite, so in a full buffer it is the oldest entry.
-    for (int i = 0; i < LOG_BUF_SIZE; i++) {
-        int idx = (log_head + i) % LOG_BUF_SIZE;
-        log_entry_t *e = &log_buf[idx];
-        if (e->seq == 0 || e->seq <= since) continue;
-        if (pos > 11800) break;  // safety margin
-        if (!first) buf[pos++] = ',';
-        first = false;
-        pos += sprintf(buf + pos,
-            "{\"s\":%u,\"t\":%u,\"m\":\"%s\"}",
-            (unsigned)e->seq, (unsigned)e->ts_ms, e->msg);
-    }
-    xSemaphoreGive(log_mutex);
-
-    pos += sprintf(buf + pos, "]}");
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_send(req, buf, pos);
-    free(buf);
-    return ESP_OK;
-}
-
-static esp_err_t config_get_handler(httpd_req_t *req)
-{
-    xSemaphoreTake(config_mutex, portMAX_DELAY);
-    char buf[512];
-    int len = snprintf(buf, sizeof(buf),
-        "{\"maxScore\":%lu,\"minScore\":%lu,"
-        "\"defaultRollDelay\":%d,\"rollDelayMod\":%d,"
-        "\"rollThresh\":%d,\"slowRollThresh\":%d,\"slowRollDelayMod\":%d,"
-        "\"defaultIncrement\":%d,\"blinkDelay\":%d,"
-        "\"waveDuration\":%d,\"waveDelay\":%d}",
-        shared_config.maxScore, shared_config.minScore,
-        shared_config.defaultRollDelay, shared_config.rollDelayMod,
-        shared_config.rollThresh, shared_config.slowRollThresh, shared_config.slowRollDelayMod,
-        shared_config.defaultIncrement, shared_config.blinkDelay,
-        shared_config.waveDuration, shared_config.waveDelay);
-    xSemaphoreGive(config_mutex);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_send(req, buf, len);
-    return ESP_OK;
-}
-
-static void forward_to_laptop(const char *path, const char *body)
-{
-    if (laptop_ip[0] == '\0') return;
-
-    char url[64];
-    snprintf(url, sizeof(url), "http://%s:6969%s", laptop_ip, path);
-
-    esp_http_client_config_t config = {};
-    config.url = url;
-    config.method = HTTP_METHOD_POST;
-    config.timeout_ms = 3000;
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body, strlen(body));
-
-    esp_err_t err = esp_http_client_perform(client);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Forward to %s failed: %s", url, esp_err_to_name(err));
-    }
-    esp_http_client_cleanup(client);
-}
-
-static void fwd_task(void *arg)
-{
-    fwd_event_t evt;
-    char body[192];
-
-    while (1) {
-        if (xQueueReceive(fwd_queue, &evt, portMAX_DELAY) == pdTRUE) {
-            if (laptop_ip[0] == '\0') continue;
-
-            switch (evt.type) {
-            case FWD_SCORE:
-                snprintf(body, sizeof(body),
-                    "{\"id\":%d,\"hour\":%d,\"minute\":%d,\"score\":%d}",
-                    evt.id, evt.hour, evt.minute, evt.score);
-                forward_to_laptop("/api/scores", body);
-                break;
-            case FWD_CLAIM:
-                snprintf(body, sizeof(body),
-                    "{\"id\":%d,\"name\":\"%s\"}", evt.id, evt.name);
-                forward_to_laptop("/api/scores/claim", body);
-                break;
-            }
-        }
-    }
-}
-
-static void fetch_history_from_laptop(void)
-{
-    if (laptop_ip[0] == '\0') return;
-
-    char url[64];
-    snprintf(url, sizeof(url), "http://%s:6969/api/scores/history", laptop_ip);
-
-    esp_http_client_config_t config = {};
-    config.url = url;
-    config.method = HTTP_METHOD_GET;
-    config.timeout_ms = 5000;
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "History fetch failed to open: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    if (content_length <= 0 || content_length > 8192) {
-        ESP_LOGW(TAG, "History: bad content length %d", content_length);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return;
-    }
-
-    char *buf = (char *)malloc(content_length + 1);
-    if (!buf) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return;
-    }
-
-    int read_len = esp_http_client_read(client, buf, content_length);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    if (read_len <= 0) {
-        free(buf);
-        return;
-    }
-    buf[read_len] = '\0';
-
-    // Simple JSON array parser for:
-    // [{"id":1,"hour":14,"minute":32,"score":750,"name":"Lucas","has_photo":true}, ...]
-    score_count = 0;
-    next_score_id = 1;
-
-    char *p = buf;
-    while ((p = strstr(p, "\"id\"")) != NULL) {
-        if (score_count >= MAX_SCORES) break;
-
-        score_entry_t *s = &scores[score_count];
-        memset(s, 0, sizeof(*s));
-
-        // Find end of current JSON object
-        char *obj_end = strchr(p, '}');
-        if (!obj_end) break;
-
-        // Parse id
-        char *id_colon = strchr(p, ':');
-        if (id_colon && id_colon < obj_end) {
-            s->id = atoi(id_colon + 1);
-            if (s->id >= next_score_id) next_score_id = s->id + 1;
-        }
-
-        // Parse hour
-        char *h = strstr(p, "\"hour\"");
-        if (h && h < obj_end) {
-            char *hc = strchr(h, ':');
-            if (hc) s->hour = atoi(hc + 1);
-        }
-
-        // Parse minute
-        char *m = strstr(p, "\"minute\"");
-        if (m && m < obj_end) {
-            char *mc = strchr(m, ':');
-            if (mc) s->minute = atoi(mc + 1);
-        }
-
-        // Parse score
-        char *sc = strstr(p, "\"score\"");
-        if (sc && sc < obj_end) {
-            char *scc = strchr(sc, ':');
-            if (scc) s->score = atoi(scc + 1);
-        }
-
-        // Parse name
-        char *n = strstr(p, "\"name\"");
-        if (n && n < obj_end) {
-            char *nc = strchr(n, ':');
-            if (nc) {
-                char *q1 = strchr(nc, '"');
-                if (q1) {
-                    q1++;
-                    char *q2 = strchr(q1, '"');
-                    if (q2) {
-                        int len = q2 - q1;
-                        if (len >= MAX_NAME_LEN) len = MAX_NAME_LEN - 1;
-                        int dst = 0;
-                        for (int i = 0; i < len && dst < MAX_NAME_LEN - 1; i++) {
-                            if (q1[i] != '"' && q1[i] != '\\') {
-                                s->name[dst++] = q1[i];
-                            }
-                        }
-                        s->name[dst] = '\0';
-                    }
+    // Route by "type"
+    const char *t = strstr(buf, "\"type\"");
+    if (t) {
+        const char *q1 = strchr(t + 6, '"');
+        if (q1) {
+            q1++;
+            const char *q2 = strchr(q1, '"');
+            if (q2) {
+                int tl = (int)(q2 - q1);
+                if (tl == 6 && strncmp(q1, "config", 6) == 0) {
+                    apply_config_from_json(buf);
+                } else if (tl == 4 && strncmp(q1, "ping", 4) == 0) {
+                    // no-op; native WS keepalive is enough
+                } else {
+                    ESP_LOGW(TAG, "unknown msg type");
                 }
             }
         }
-
-        // Parse has_photo
-        char *hp = strstr(p, "\"has_photo\"");
-        if (hp && hp < obj_end) {
-            char *hpc = strchr(hp, ':');
-            if (hpc) {
-                char *val = hpc + 1;
-                while (*val == ' ') val++;
-                s->has_photo = (strncmp(val, "true", 4) == 0);
-            }
-        }
-
-        score_count++;
-        p++; // advance past current match
     }
 
-    ESP_LOGI(TAG, "Loaded %d scores from backend history", score_count);
-    free(buf);
+    if (buf != stackbuf) free(buf);
 }
 
-static esp_err_t backend_register_handler(httpd_req_t *req)
+static void on_ws_connect(void)
 {
-    char buf[128];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
-
-    char *ip_key = strstr(buf, "\"ip\"");
-    if (!ip_key) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing ip");
-        return ESP_FAIL;
-    }
-    char *ip_colon = strchr(ip_key, ':');
-    if (!ip_colon) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip");
-        return ESP_FAIL;
-    }
-    char *quote1 = strchr(ip_colon, '"');
-    if (!quote1) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip");
-        return ESP_FAIL;
-    }
-    quote1++;
-    char *quote2 = strchr(quote1, '"');
-    if (!quote2 || (quote2 - quote1) >= (int)sizeof(laptop_ip)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip");
-        return ESP_FAIL;
-    }
-
-    int ip_len = quote2 - quote1;
-
-    // Validate IP: only digits and dots, exactly 3 dots
-    int dots = 0;
-    bool valid_ip = true;
-    for (int i = 0; i < ip_len; i++) {
-        if (quote1[i] == '.') dots++;
-        else if (quote1[i] < '0' || quote1[i] > '9') { valid_ip = false; break; }
-    }
-    if (!valid_ip || dots != 3) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ip format");
-        return ESP_FAIL;
-    }
-
-    memcpy(laptop_ip, quote1, ip_len);
-    laptop_ip[ip_len] = '\0';
-
-    ESP_LOGI(TAG, "Backend registered at %s", laptop_ip);
-
-    // Parse optional time fields and arm wall-clock sync
-    int h = -1, m = -1, s = -1;
-    json_parse_int(buf, "hour",   &h);
-    json_parse_int(buf, "minute", &m);
-    json_parse_int(buf, "second", &s);
-    if (h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
-        sync_hour    = h;
-        sync_minute  = m;
-        sync_second  = s;
-        sync_boot_ms = esp_timer_get_time() / 1000;
-        time_synced  = true;
-        ESP_LOGI(TAG, "Wall clock synced: %02d:%02d:%02d", h, m, s);
-    }
-
-    // Fetch persisted scores from laptop
-    fetch_history_from_laptop();
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
-}
-
-static esp_err_t photo_ok_handler(httpd_req_t *req)
-{
-    char buf[64];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
-
-    char *id_key = strstr(buf, "\"id\"");
-    if (!id_key) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id");
-        return ESP_FAIL;
-    }
-    char *colon = strchr(id_key, ':');
-    if (!colon) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid id");
-        return ESP_FAIL;
-    }
-    int id = atoi(colon + 1);
-
-    for (int i = 0; i < score_count; i++) {
-        if (scores[i].id == id) {
-            scores[i].has_photo = true;
-            ESP_LOGI(TAG, "Photo confirmed for score %d", id);
-            break;
-        }
-    }
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
-}
-
-static httpd_handle_t start_webserver(void)
-{
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 8192;
-    config.max_uri_handlers = 16;
-    config.uri_match_fn = httpd_uri_match_wildcard;
-    httpd_handle_t server = NULL;
-
-    if (httpd_start(&server, &config) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start HTTP server");
-        return NULL;
-    }
-
-    const httpd_uri_t root_uri = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = root_get_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &root_uri);
-
-    const httpd_uri_t scores_uri = {
-        .uri = "/api/scores",
-        .method = HTTP_GET,
-        .handler = scores_get_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &scores_uri);
-
-    const httpd_uri_t ota_uri = {
-        .uri = "/api/ota",
-        .method = HTTP_POST,
-        .handler = ota_post_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &ota_uri);
-
-    const httpd_uri_t config_uri = {
-        .uri = "/api/config",
-        .method = HTTP_POST,
-        .handler = config_post_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &config_uri);
-
-    const httpd_uri_t config_get_uri = {
-        .uri = "/api/config",
-        .method = HTTP_GET,
-        .handler = config_get_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &config_get_uri);
-
-    const httpd_uri_t logs_get_uri = {
-        .uri = "/api/logs",
-        .method = HTTP_GET,
-        .handler = logs_get_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &logs_get_uri);
-
-    const httpd_uri_t claim_uri = {
-        .uri = "/api/claim",
-        .method = HTTP_POST,
-        .handler = claim_post_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &claim_uri);
-
-    const httpd_uri_t backend_uri = {
-        .uri = "/api/backend",
-        .method = HTTP_POST,
-        .handler = backend_register_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &backend_uri);
-
-    const httpd_uri_t photo_ok_uri = {
-        .uri = "/api/photo_ok",
-        .method = HTTP_POST,
-        .handler = photo_ok_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &photo_ok_uri);
-
-    // Captive portal catch-all: any other URL redirects to /
-    const httpd_uri_t captive_uri = {
-        .uri = "/*",
-        .method = HTTP_GET,
-        .handler = captive_redirect_handler,
-        .user_ctx = NULL,
-    };
-    httpd_register_uri_handler(server, &captive_uri);
-
-    ESP_LOGI(TAG, "HTTP server started on port %d", config.server_port);
-    return server;
+    const esp_app_desc_t *d = esp_app_get_description();
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg),
+        "{\"type\":\"hello\",\"fw\":\"%s\",\"boot\":%u}",
+        d ? d->version : "?", (unsigned)s_boot_id);
+    ws_client_send_text(msg, (size_t)n);
+    ESP_LOGI(TAG, "sent hello (boot=%u)", (unsigned)s_boot_id);
 }
 
 // ---------------------------------------------------------------------------
-// Serial test input — send "SCORE:750" via serial to inject fake scores
+// PunchMeter task (core 1)
 // ---------------------------------------------------------------------------
 
-static void serial_test_task(void *arg)
+static void punchmeter_task(void *arg)
 {
-    char line[64];
-    int pos = 0;
-
-    ESP_LOGI(TAG, "Serial test input ready — send SCORE:<value> to inject scores");
+    (void)arg;
+    punchmeter_setup();
+    int prev_score = -1;
 
     while (1) {
-        int c = fgetc(stdin);
-        if (c == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
+        if (s_cfg.dirty && xSemaphoreTake(s_cfg.mux, 0) == pdTRUE) {
+            PunchmeterConfig local = s_cfg.cfg;
+            s_cfg.dirty = false;
+            xSemaphoreGive(s_cfg.mux);
+            punchmeter_set_config(&local);
         }
-        if (c == '\n' || c == '\r') {
-            if (pos > 0) {
-                line[pos] = '\0';
-                if (strncmp(line, "SCORE:", 6) == 0) {
-                    int val = atoi(line + 6);
-                    if (val >= 0 && val <= 999) {
-                        score_event_t evt = {
-                            .score = val,
-                            .timestamp_ms = esp_timer_get_time() / 1000,
-                        };
-                        xQueueSend(score_queue, &evt, 0);
-                        ESP_LOGI(TAG, "Test score injected: %d", val);
-                    }
+
+        punchmeter_loop();
+
+        int cur = punchmeter_get_last_score();
+        if (cur >= 0 && cur != prev_score) {
+            score_item_t item = {
+                .id = s_next_score_id++,
+                .score = cur,
+                .ts_epoch = time(NULL),
+            };
+            score_queue_push(&item);
+            prev_score = cur;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Uploader task — drain queue → WS
+// ---------------------------------------------------------------------------
+
+static void uploader_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        score_item_t item;
+        if (score_queue_peek(&item)) {
+            if (ws_client_is_connected()) {
+                char msg[128];
+                int n = snprintf(msg, sizeof(msg),
+                    "{\"type\":\"score\",\"id\":%d,\"score\":%d,\"ts\":%lld}",
+                    item.id, item.score, (long long)item.ts_epoch);
+                if (ws_client_send_text(msg, (size_t)n) == ESP_OK) {
+                    score_queue_pop();
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(500));
                 }
-                pos = 0;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(1000));
             }
-        } else if (pos < (int)sizeof(line) - 1) {
-            line[pos++] = (char)c;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Captive portal DNS server — resolves ALL domains to 192.168.4.1
-// ---------------------------------------------------------------------------
-
-#define DNS_PORT 53
-#define DNS_MAX_LEN 256
-
-static void dns_server_task(void *pvParameters)
-{
-    uint8_t rx_buf[DNS_MAX_LEN];
-    uint8_t tx_buf[DNS_MAX_LEN];
-
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "DNS: failed to create socket");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    struct sockaddr_in server_addr = {};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(DNS_PORT);
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        ESP_LOGE(TAG, "DNS: bind failed");
-        close(sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "DNS server started on port %d", DNS_PORT);
-
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-
-        int len = recvfrom(sock, rx_buf, DNS_MAX_LEN, 0,
-                           (struct sockaddr *)&client_addr, &addr_len);
-        if (len < 12) continue;  // minimum DNS header size
-
-        // Build DNS response: copy header + question, add answer
-        memcpy(tx_buf, rx_buf, len);
-
-        // Set response flags: QR=1, AA=1, RA=1
-        tx_buf[2] = 0x84;  // QR=1, Opcode=0, AA=1
-        tx_buf[3] = 0x00;  // RA=0, RCODE=0
-        // Set answer count to 1
-        tx_buf[6] = 0x00;
-        tx_buf[7] = 0x01;
-
-        int pos = len;
-
-        // Answer: pointer to question name + A record pointing to 192.168.4.1
-        tx_buf[pos++] = 0xC0;  // name pointer
-        tx_buf[pos++] = 0x0C;  // offset to question name
-        tx_buf[pos++] = 0x00;  // type A
-        tx_buf[pos++] = 0x01;
-        tx_buf[pos++] = 0x00;  // class IN
-        tx_buf[pos++] = 0x01;
-        tx_buf[pos++] = 0x00;  // TTL = 60 seconds
-        tx_buf[pos++] = 0x00;
-        tx_buf[pos++] = 0x00;
-        tx_buf[pos++] = 0x3C;
-        tx_buf[pos++] = 0x00;  // rdlength = 4
-        tx_buf[pos++] = 0x04;
-        tx_buf[pos++] = 192;   // 192.168.4.1
-        tx_buf[pos++] = 168;
-        tx_buf[pos++] = 4;
-        tx_buf[pos++] = 1;
-
-        sendto(sock, tx_buf, pos, 0,
-               (struct sockaddr *)&client_addr, addr_len);
-    }
-}
-
-static void start_dns_server(void)
-{
-    xTaskCreate(dns_server_task, "dns_server", 4096, NULL, 5, NULL);
-}
-
-// ---------------------------------------------------------------------------
-// Wi-Fi AP
-// ---------------------------------------------------------------------------
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
-        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
-        ESP_LOGI(TAG, "Station connected, AID=%d", event->aid);
-    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
-        ESP_LOGI(TAG, "Station disconnected, AID=%d", event->aid);
-    }
-}
-
-static void wifi_init_ap(void)
-{
-    esp_netif_create_default_wifi_ap();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler, NULL, NULL));
-
-    wifi_config_t wifi_config = {};
-    memcpy(wifi_config.ap.ssid, WIFI_SSID, strlen(WIFI_SSID));
-    wifi_config.ap.ssid_len = strlen(WIFI_SSID);
-    wifi_config.ap.channel = WIFI_CHANNEL;
-    wifi_config.ap.max_connection = MAX_STA_CONN;
-    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "Wi-Fi AP started — SSID: %s, Channel: %d", WIFI_SSID, WIFI_CHANNEL);
-}
-
-// ---------------------------------------------------------------------------
-// Main
+// app_main
 // ---------------------------------------------------------------------------
 
 extern "C" void app_main(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
-    ESP_LOGI(TAG, "Bapthit firmware v%s started", app_desc->version);
+    ESP_LOGI(TAG, "Bapthit firmware v%s started (probe mode)",
+             app_desc ? app_desc->version : "?");
 
-    // Validate OTA firmware if pending verification
+    // OTA rollback confirmation
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t ota_state;
     if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK
         && ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-        ESP_LOGI(TAG, "New OTA firmware — validating...");
         esp_ota_mark_app_valid_cancel_rollback();
         ESP_LOGI(TAG, "OTA firmware validated");
     }
 
-    // Initialize NVS (required by Wi-Fi)
+    // NVS (required by WiFi)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -1224,30 +275,43 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize networking and Wi-Fi AP
+    // Netif + event loop
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_init_ap();
 
-    // Create PunchMeter communication primitives
-    score_queue = xQueueCreate(SCORE_QUEUE_SIZE, sizeof(score_event_t));
-    config_mutex = xSemaphoreCreateMutex();
-    log_mutex = xSemaphoreCreateMutex();
+    // Init mDNS so that gethostbyname() can resolve <host>.local
+    ESP_ERROR_CHECK(mdns_init());
+    mdns_hostname_set("bapthit-device");
+
+    // Synchronization primitives
+    s_cfg.mux = xSemaphoreCreateMutex();
+    score_queue_init();
     punchmeter_set_logger(pm_log_sink);
 
-    // Create forwarding queue and task
-    fwd_queue = xQueueCreate(FWD_QUEUE_SIZE, sizeof(fwd_event_t));
-    xTaskCreate(fwd_task, "fwd_task", 4096, NULL, 3, NULL);
+    // Random boot session id, used by the backend to detect a fresh boot
+    // and remap our local score ids (which always start at 1) to a
+    // collision-free range in the score table.
+    s_boot_id = esp_random();
 
-    // Start PunchMeter on core 1
+    // PunchMeter task on core 1 — keeps the game responsive even while
+    // WiFi/WS is bringing itself up.
     xTaskCreatePinnedToCore(punchmeter_task, "punchmeter", 4096, NULL, 5, NULL, 1);
 
-    // Start servers
-    start_webserver();
-    start_dns_server();
+    // WiFi STA — block until IP
+    ESP_ERROR_CHECK(wifi_sta_start_and_wait());
 
-    // Start serial test input task
-    xTaskCreate(serial_test_task, "serial_test", 4096, NULL, 3, NULL);
+    // WebSocket client
+    ws_client_cfg_t wsc = {
+        .host = CONFIG_BAPTHIT_BACKEND_HOST,
+        .port = CONFIG_BAPTHIT_BACKEND_PORT,
+        .path = "/ws/device",
+        .on_connect = on_ws_connect,
+        .on_text = on_ws_text,
+    };
+    ESP_ERROR_CHECK(ws_client_start(&wsc));
+
+    // Uploader task
+    xTaskCreate(uploader_task, "uploader", 4096, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "Running on partition: %s", running->label);
 }

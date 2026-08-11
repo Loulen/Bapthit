@@ -1,0 +1,8 @@
+# Copy to sdkconfig.defaults.local and fill in real creds.
+# This file is loaded as an overlay on top of sdkconfig.defaults at build time.
+# It is gitignored so the WiFi password never leaves your machine.
+
+CONFIG_BAPTHIT_WIFI_SSID="your-home-wifi"
+CONFIG_BAPTHIT_WIFI_PASS="your-wpa2-password"
+CONFIG_BAPTHIT_BACKEND_HOST="bapthit.local"
+CONFIG_BAPTHIT_BACKEND_PORT=6969

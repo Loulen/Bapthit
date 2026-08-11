@@ -1,0 +1,28 @@
+menu "Bapthit Configuration"
+
+config BAPTHIT_WIFI_SSID
+    string "Home WiFi SSID"
+    default "bapthit-missing-ssid"
+    help
+        SSID of the station WiFi network the ESP will join.
+        Override in sdkconfig.defaults.local (gitignored).
+
+config BAPTHIT_WIFI_PASS
+    string "Home WiFi password"
+    default "bapthit-missing-pass"
+    help
+        WPA2 PSK for the station WiFi.
+        Override in sdkconfig.defaults.local (gitignored).
+
+config BAPTHIT_BACKEND_HOST
+    string "Backend mDNS hostname"
+    default "bapthit.local"
+    help
+        Hostname resolved via mDNS for the laptop FastAPI backend.
+
+config BAPTHIT_BACKEND_PORT
+    int "Backend TCP port"
+    default 6969
+    range 1 65535
+
+endmenu
